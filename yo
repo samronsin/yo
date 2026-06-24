@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+PROMPT="yo"
+
+usage() { echo "usage: $(basename "$0") <codex|claude> [--model MODEL]" >&2; exit 2; }
+
+# Args: required first is the CLI to drive ("codex" or "claude", e.g.
+# `yo claude`); optional --model overrides the model (else a per-agent default).
+# Validate before logging so a bad/missing arg fails fast to stderr.
+AGENT="${1:-}"
+case "$AGENT" in
+  codex|claude) shift ;;
+  *) usage ;;
+esac
+
+MODEL=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --model) [[ $# -ge 2 ]] || usage; MODEL="$2"; shift 2 ;;
+    *)       usage ;;
+  esac
+done
+
+# Logs are named per CLI so codex and claude runs stay separate.
+LOG_DIR="$ROOT_DIR/logs"
+LAST_MESSAGE_FILE="$LOG_DIR/yo-$AGENT.last.txt"
+
+mkdir -p "$LOG_DIR"
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+log_file="$LOG_DIR/yo-$AGENT-$timestamp.log"
+
+run_codex() {
+  local model="${MODEL:-gpt-5.4-mini}"
+  echo "agent=codex model=$model reasoning_effort=low"
+  codex exec \
+    --ephemeral \
+    --ignore-user-config \
+    --ignore-rules \
+    --skip-git-repo-check \
+    --sandbox read-only \
+    --color never \
+    --output-last-message "$LAST_MESSAGE_FILE" \
+    -m "$model" \
+    -c 'model_reasoning_effort="low"' \
+    -c 'model_reasoning_summary="none"' \
+    -c 'model_verbosity="low"' \
+    -c "include_environment_context=false" \
+    -c "include_apps_instructions=false" \
+    -c "include_collaboration_mode_instructions=false" \
+    -c "project_doc_max_bytes=0" \
+    -c "tool_output_token_limit=1024" \
+    "$PROMPT"
+}
+
+run_claude() {
+  local model="${MODEL:-haiku}" rc
+  echo "agent=claude model=$model"
+  # --print: non-interactive. default permission mode keeps it non-blocking and
+  # read-only (in print mode an unpermitted tool call is denied, not prompted).
+  # stdout is the final message; capture it, then echo into the log. Capture
+  # claude's exit code before cat so we report the real status.
+  claude \
+    --print \
+    --model "$model" \
+    --output-format text \
+    --permission-mode default \
+    "$PROMPT" >"$LAST_MESSAGE_FILE"
+  rc=$?
+  cat "$LAST_MESSAGE_FILE"
+  return "$rc"
+}
+
+{
+  echo "[$(date -Is)] yo start"
+  echo "root=$ROOT_DIR"
+
+  cd "$ROOT_DIR"
+
+  set +e
+  case "$AGENT" in
+    codex)  run_codex ;;
+    claude) run_claude ;;
+  esac
+  rc=$?
+  set -e
+
+  echo "[$(date -Is)] yo end rc=$rc"
+  exit "$rc"
+} >>"$log_file" 2>&1

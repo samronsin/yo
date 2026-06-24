@@ -1,0 +1,6 @@
+# Runtime logs and last-message files
+logs/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
