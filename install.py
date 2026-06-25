@@ -4,14 +4,16 @@
 Given a timezone and working hours, schedules --num-windows runs (default 3)
 spaced --window-hours apart (default 5; each run covers the stretch until the
 next one) and centers that block on the working day so the slack is split
-evenly before and after. Installs a cron entry at each run time, then prints
-the resulting crontab and the effective coverage (each run's stretch clipped
-to the working hours).
+evenly before and after. The run times are converted from the requested
+timezone into the system-local time cron schedules against (cron has no
+portable per-crontab timezone -- see to_system_times), a cron entry is
+installed at each, then the resulting crontab is printed.
 """
 import argparse
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -101,6 +103,37 @@ def compute_run_times(start, end, num_windows, window_hours):
     ]
 
 
+def to_system_times(run_times, tz):
+    """Convert run times from `tz` into the system-local times cron schedules against.
+
+    cron has no portable per-crontab timezone: Debian's cron ignores CRON_TZ
+    entirely (`man 5 crontab` LIMITATIONS), running every job in the daemon's own
+    timezone regardless. So rather than ask cron to interpret the schedule in `tz`,
+    we bake the conversion into the HH:MM fields here -- emitting times in the
+    daemon's timezone (which `datetime.astimezone()` reads the same way cron does).
+    This is correct on every cron implementation, since the daemon always uses
+    system-local time.
+
+    The offset is fixed at install time, so a static crontab drifts by the DST delta
+    across a transition; re-run install.py after the clocks change to re-anchor.
+
+    Args:
+        run_times: Run times as fractional hours in `tz` (see hour_minute).
+        tz: IANA timezone name the run times are expressed in.
+
+    Returns:
+        The run times as fractional hours in the system-local timezone.
+    """
+    source = ZoneInfo(tz)
+    ref = datetime.now(source)  # reference date fixes the DST offset to "now"
+    out = []
+    for t in run_times:
+        hour, minute = hour_minute(t)
+        local = datetime(ref.year, ref.month, ref.day, hour, minute, tzinfo=source).astimezone()
+        out.append(local.hour + local.minute / 60)
+    return out
+
+
 def cron_path_for(agents):
     """Build the cron PATH so the jobs find each agent's CLI where it lives.
 
@@ -117,12 +150,18 @@ def cron_path_for(agents):
     return ":".join(dict.fromkeys(dirs + BASE_CRON_PATH.split(":")))
 
 
-def render_cron(run_times, tz, agent, cron_path):
-    """Render the managed crontab block for the given run times and timezone.
+def render_cron(system_times, tz, agent, cron_path):
+    """Render the managed crontab block for the given run times.
+
+    The times are emitted in the daemon's own timezone (see to_system_times); we
+    deliberately don't write a CRON_TZ line, since Debian's cron ignores it and
+    other crons already schedule in system-local time -- so the converted fields
+    are correct everywhere.
 
     Args:
-        run_times: Run times as fractional hours (see hour_minute).
-        tz: IANA timezone name for the CRON_TZ line.
+        system_times: Run times as fractional hours in system-local time
+            (see to_system_times and hour_minute).
+        tz: IANA timezone the schedule was requested in, recorded as a comment.
         agent: Agent CLI to run, passed to the yo command as its argument.
         cron_path: PATH value for the block (see cron_path_for).
 
@@ -130,13 +169,14 @@ def render_cron(run_times, tz, agent, cron_path):
         The crontab text, wrapped in the begin/end markers, ending in a newline.
     """
     begin, end = markers(agent)
+    local_tz = datetime.now().astimezone().tzname()
     lines = [
         begin,
+        f"# {tz} schedule converted to system time ({local_tz}); re-run install.py after a clock change",
         f"PATH={cron_path}",
-        f"CRON_TZ={tz}",
         "",
     ]
-    for t in run_times:
+    for t in system_times:
         hour, minute = hour_minute(t)
         lines.append(f"{minute} {hour} * * * {JOB_CMD} {agent}")
     lines.append(end)
@@ -178,10 +218,14 @@ def main(args):
         )
 
     run_times = compute_run_times(start, end, args.num_windows, args.window_hours)
-    cron_content = "".join(render_cron(run_times, args.tz, a, cron_path) for a in agents)
+    system_times = to_system_times(run_times, args.tz)
+    cron_content = "".join(render_cron(system_times, args.tz, a, cron_path) for a in agents)
 
-    times = ", ".join(f"{h:02d}:{m:02d}" for h, m in map(hour_minute, run_times))
-    print(f"Scheduled pings ({', '.join(agents)}): {times}")
+    requested = ", ".join(f"{h:02d}:{m:02d}" for h, m in map(hour_minute, run_times))
+    scheduled = ", ".join(f"{h:02d}:{m:02d}" for h, m in map(hour_minute, system_times))
+    local_tz = datetime.now().astimezone().tzname()
+    print(f"Scheduled pings ({', '.join(agents)}): {requested} {args.tz} "
+          f"-> {scheduled} {local_tz} (cron schedules in system time)")
 
     print(f"\nGenerated cron snippet:\n\n{cron_content}")
 

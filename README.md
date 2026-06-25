@@ -34,7 +34,9 @@ the hours or agents. See [Usage](#usage) for more.
 - **`install.py`** — generates and installs the crontab. Given a timezone and
   working hours, it builds a schedule that re-anchors each agent's 5h usage
   window across your day (see [Window model](#window-model)) and pipes the
-  result into your crontab.
+  result into your crontab. The schedule is computed in your `--tz` and then
+  **converted to the system time cron actually schedules against** (see
+  [Timezones](#timezones)).
 - **`test_install.py`** — unit tests for the schedule helpers.
 
 ## Usage
@@ -101,6 +103,23 @@ offers instead is:
 If you live in a single vendor's ecosystem, their native routine is probably the
 simpler choice. `yo` is for driving several agents uniformly from an always-on
 box you already run.
+
+## Timezones
+
+You give `install.py` a `--tz` (e.g. `Europe/Paris`) and it reasons about the
+schedule in that timezone. Since `cron` schedules jobs in the **system
+timezone**, with no portable way to override that per-crontab, `install.py`
+**converts** each run time from your `--tz` into the system timezone before
+writing the cron lines, which is correct on every `cron`. The install output
+shows both, e.g.:
+
+```
+Scheduled pings (claude): 06:00, 11:02, 16:04 Europe/Paris -> 04:00, 09:02, 14:04 UTC (cron schedules in system time)
+```
+
+Because a static crontab can't follow daylight-saving transitions, the offset is
+fixed at install time. After the clocks change (or if you move the box to
+another timezone), **re-run `install.py`** to re-anchor the schedule.
 
 ## Logs
 
