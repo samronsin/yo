@@ -32,11 +32,12 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 log_file="$LOG_DIR/yo-$AGENT-$timestamp.log"
 
 run_codex() {
+  # No --ignore-user-config: it drops service_tier="default", without which the
+  # ping can't open a 5h window (only join one), so nothing anchors.
   local model="${MODEL:-gpt-5.4-mini}"
   echo "agent=codex model=$model reasoning_effort=low"
   codex exec \
     --ephemeral \
-    --ignore-user-config \
     --ignore-rules \
     --skip-git-repo-check \
     --sandbox read-only \
