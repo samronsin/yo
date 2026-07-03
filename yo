@@ -34,7 +34,10 @@ log_file="$LOG_DIR/yo-$AGENT-$timestamp.log"
 run_codex() {
   # No --ignore-user-config: it drops service_tier="default", without which the
   # ping can't open a 5h window (only join one), so nothing anchors.
-  local model="${MODEL:-gpt-5.4-mini}"
+  # gpt-5.5: since 2026-07-03 only gpt-5.5 requests open a 5h usage window
+  # server-side; gpt-5.4/-mini pings count usage but only join an existing
+  # window, so they anchor nothing (verified by A/B pings + rateLimits/read).
+  local model="${MODEL:-gpt-5.5}"
   echo "agent=codex model=$model reasoning_effort=low"
   codex exec \
     --ephemeral \
