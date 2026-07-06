@@ -32,14 +32,16 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 log_file="$LOG_DIR/yo-$AGENT-$timestamp.log"
 
 run_codex() {
-  # Anchoring a 5h usage window server-side requires gpt-5.5, a non-ephemeral
-  # session, AND reasoning effort above "low" (as of 2026-07-06; see issue #9):
-  # smaller models, --ephemeral runs, and low-effort requests count usage but
-  # only join an existing window. The effort check is on the declared field,
-  # not tokens spent — this prompt yields 0 reasoning tokens either way. Hence
-  # no --ephemeral (sessions persist to ~/.codex/sessions, a few KB per ping)
-  # and no --ignore-user-config (drops config the ping needs).
-  local model="${MODEL:-gpt-5.5}"
+  # Anchoring a 5h usage window server-side requires a non-ephemeral session
+  # AND reasoning effort above "low" (as of 2026-07-06; see issue #9) — model-
+  # independent as far as tested (gpt-5.4 and gpt-5.5 both anchor at medium;
+  # both fail the other conditions). --ephemeral runs and low-effort requests
+  # count usage but only join an existing window. The effort check is on the
+  # declared field, not tokens spent — this prompt yields 0 reasoning tokens
+  # either way. Hence no --ephemeral (sessions persist to ~/.codex/sessions,
+  # a few KB per ping) and no --ignore-user-config (drops config the ping
+  # needs).
+  local model="${MODEL:-gpt-5.4}"
   echo "agent=codex model=$model reasoning_effort=medium"
   codex exec \
     --ignore-rules \
