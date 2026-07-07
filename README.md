@@ -29,7 +29,7 @@ the hours or agents. See [Usage](#usage) for more.
 - **`yo`** — the runner. Invokes the selected agent CLI once with the prompt
   `yo`, in a read-only/non-interactive mode, and writes the output to a
   per-agent log. The agent is a required first argument (`codex` or `claude`);
-  an optional `--model` flag overrides the per-agent default (GPT-5.4-mini for
+  an optional `--model` flag overrides the per-agent default (GPT-5.4 for
   Codex, Haiku for Claude).
 - **`install.py`** — generates and installs the crontab. Given a timezone and
   working hours, it builds a schedule that re-anchors each agent's 5h usage
@@ -44,7 +44,7 @@ the hours or agents. See [Usage](#usage) for more.
 Run once, ad hoc:
 
 ```sh
-./yo codex                    # Codex, default model (GPT-5.4-mini)
+./yo codex                    # Codex, default model (GPT-5.4)
 ./yo claude                   # Claude, default model (Haiku)
 ./yo claude --model opus      # Claude with an explicit model
 ```
