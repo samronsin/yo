@@ -32,16 +32,19 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 log_file="$LOG_DIR/yo-$AGENT-$timestamp.log"
 
 run_codex() {
-  # Anchoring a 5h usage window server-side requires a non-ephemeral session
-  # AND reasoning effort above "low" (as of 2026-07-06; see issue #9) — model-
-  # independent as far as tested (gpt-5.4 and gpt-5.5 both anchor at medium;
-  # both fail the other conditions). --ephemeral runs and low-effort requests
-  # count usage but only join an existing window. The effort check is on the
-  # declared field, not tokens spent — this prompt yields 0 reasoning tokens
-  # either way. Hence no --ephemeral (sessions persist to ~/.codex/sessions,
-  # a few KB per ping) and no --ignore-user-config (drops config the ping
-  # needs).
-  local model="${MODEL:-gpt-5.4}"
+  # Anchoring the 5h usage window is model-dependent (single-variable A/B
+  # pings in unanchored gaps, 2026-08-28/29, see PR #14): gpt-5.6-terra
+  # anchors with this plain invocation, gpt-5.4 only anchored with
+  # --thread-source scheduled (a codex >= 0.150 flag), and gpt-5.6-luna never
+  # anchors. Effort is irrelevant (mini@low anchored too), so keep medium.
+  # Default to gpt-5.6-terra — gpt-5.4's catalog upgrade target (gpt-5.4
+  # retires 2026-08-31T19:00Z), proven end-to-end by the 2026-08-29 04:30Z
+  # cron ping. Don't swap models without re-testing in an unanchored gap.
+  # Still no --ephemeral (b4ed61a: ephemeral runs only join, never anchor) and
+  # no --ignore-user-config (29b9fe7: drops ~/.codex/config.toml settings the
+  # ping needs). Non-ephemeral also persists runs to ~/.codex/sessions for
+  # auditing from cron logs.
+  local model="${MODEL:-gpt-5.6-terra}"
   echo "agent=codex model=$model reasoning_effort=medium"
   codex exec \
     --ignore-rules \
