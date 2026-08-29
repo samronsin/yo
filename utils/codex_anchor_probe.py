@@ -68,10 +68,18 @@ def read_rate_limits() -> dict:
         proc.kill()
 
 
-def run_ping(model: str, effort: str, thread_source: str | None, log_path: Path) -> int:
+def run_ping(model: str | None, effort: str | None,
+             thread_source: str | None, log_path: Path) -> int:
     # Go through ./yo so the invocation under test is the production one; the
-    # ping's own output lands in logs/yo-codex-*.log like any cron run.
-    cmd = [str(ROOT_DIR / "yo"), "codex", "--model", model, "--effort", effort]
+    # ping's own output lands in logs/yo-codex-*.log like any cron run. Only
+    # pass overrides that were explicitly requested, so a no-arg probe tests
+    # exactly yo's defaults rather than re-stating (and eventually shadowing)
+    # them here.
+    cmd = [str(ROOT_DIR / "yo"), "codex"]
+    if model:
+        cmd += ["--model", model]
+    if effort:
+        cmd += ["--effort", effort]
     if thread_source:
         cmd += ["--thread-source", thread_source]
     with open(log_path, "a") as log:
@@ -84,9 +92,11 @@ def run_ping(model: str, effort: str, thread_source: str | None, log_path: Path)
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--model", default="gpt-5.4")
-    parser.add_argument("--effort", default="medium",
-                        choices=["low", "medium", "high"])
+    parser.add_argument("--model", default=None,
+                        help="override; omitted = yo's default model")
+    parser.add_argument("--effort", default=None,
+                        choices=["low", "medium", "high"],
+                        help="override; omitted = yo's default effort")
     parser.add_argument("--thread-source", default=None,
                         help='e.g. "scheduled"; omitted = codex default ("user")')
     parser.add_argument("--wait", type=int, default=120,
@@ -107,7 +117,9 @@ def main() -> int:
         with open(log_path, "a") as log:
             log.write(line + "\n")
 
-    variant = f"model={args.model} effort={args.effort} thread_source={args.thread_source or 'user (default)'}"
+    variant = (f"model={args.model or 'yo default'} "
+               f"effort={args.effort or 'yo default'} "
+               f"thread_source={args.thread_source or 'user (default)'}")
     say(f"variant under test: {variant}")
 
     pre = read_rate_limits()
