@@ -32,18 +32,26 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 log_file="$LOG_DIR/yo-$AGENT-$timestamp.log"
 
 run_codex() {
-  # Anchoring a 5h usage window server-side requires a non-ephemeral session
-  # AND reasoning effort above "low" (as of 2026-07-06; see issue #9) — model-
-  # independent as far as tested (gpt-5.4 and gpt-5.5 both anchor at medium;
-  # both fail the other conditions). --ephemeral runs and low-effort requests
-  # count usage but only join an existing window. The effort check is on the
-  # declared field, not tokens spent — this prompt yields 0 reasoning tokens
-  # either way. Hence no --ephemeral (sessions persist to ~/.codex/sessions,
-  # a few KB per ping) and no --ignore-user-config (drops config the ping
-  # needs).
-  local model="${MODEL:-gpt-5.4}"
-  echo "agent=codex model=$model reasoning_effort=medium"
+  # --thread-source scheduled is what anchors the 5h window: A/B in the same
+  # unanchored gap on 2026-08-28 (logs/gap-anchor-test-20260828T22*, repro via
+  # ./gap_anchor_test.py) showed gpt-5.4@medium with thread_source=user does
+  # NOT anchor while the identical ping with thread_source=scheduled locks
+  # resetsAt at ping+5h; effort/model are irrelevant (mini@low anchored too),
+  # so keep effort at medium. Requires codex >= 0.150: older CLIs reject the
+  # flag with rc=2 before reaching the API, which cron logs swallow silently.
+  # Still no --ephemeral (b4ed61a: ephemeral runs only join, never anchor) and
+  # no --ignore-user-config (29b9fe7: drops ~/.codex/config.toml settings the
+  # ping needs). Non-ephemeral also persists runs to ~/.codex/sessions for
+  # auditing from cron logs.
+  # gpt-5.4 retires 2026-08-31T19:00Z; gpt-5.6-terra is its upgrade target
+  # and is proven to anchor (04:30Z cron 2026-08-29). gpt-5.6-luna does NOT
+  # anchor despite identical flags/effort (A/B 2026-08-29 09:32-09:39Z,
+  # logs/gap-anchor-test-20260829T093455Z.json) — anchoring is model-
+  # dependent, so don't swap models without re-testing in a gap.
+  local model="${MODEL:-gpt-5.6-terra}"
+  echo "agent=codex model=$model reasoning_effort=medium thread_source=scheduled"
   codex exec \
+    --thread-source scheduled \
     --ignore-rules \
     --skip-git-repo-check \
     --sandbox read-only \
