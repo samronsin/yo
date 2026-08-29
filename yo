@@ -32,12 +32,11 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 log_file="$LOG_DIR/yo-$AGENT-$timestamp.log"
 
 run_codex() {
-  # --thread-source scheduled is what anchors the 5h window: A/B in the same
-  # unanchored gap on 2026-08-28 (logs/gap-anchor-test-20260828T22*, repro via
-  # ./gap_anchor_test.py) showed gpt-5.4@medium with thread_source=user does
-  # NOT anchor while the identical ping with thread_source=scheduled locks
-  # resetsAt at ping+5h; effort/model are irrelevant (mini@low anchored too),
-  # so keep effort at medium. Requires codex >= 0.150: older CLIs reject the
+  # --thread-source scheduled is what anchors the 5h window: A/B pings in the
+  # same unanchored gap on 2026-08-28 (see PR #14) showed gpt-5.4@medium with
+  # thread_source=user does NOT anchor while the identical ping with
+  # thread_source=scheduled locks resetsAt at ping+5h; effort is irrelevant
+  # (mini@low anchored too), so keep effort at medium. Requires codex >= 0.150: older CLIs reject the
   # flag with rc=2 before reaching the API, which cron logs swallow silently.
   # Still no --ephemeral (b4ed61a: ephemeral runs only join, never anchor) and
   # no --ignore-user-config (29b9fe7: drops ~/.codex/config.toml settings the
@@ -45,9 +44,9 @@ run_codex() {
   # auditing from cron logs.
   # gpt-5.4 retires 2026-08-31T19:00Z; gpt-5.6-terra is its upgrade target
   # and is proven to anchor (04:30Z cron 2026-08-29). gpt-5.6-luna does NOT
-  # anchor despite identical flags/effort (A/B 2026-08-29 09:32-09:39Z,
-  # logs/gap-anchor-test-20260829T093455Z.json) — anchoring is model-
-  # dependent, so don't swap models without re-testing in a gap.
+  # anchor despite identical flags/effort (A/B 2026-08-29 09:32-09:39Z, see
+  # PR #14) — anchoring is model-dependent, so don't swap models without
+  # re-testing in an unanchored gap.
   local model="${MODEL:-gpt-5.6-terra}"
   echo "agent=codex model=$model reasoning_effort=medium thread_source=scheduled"
   codex exec \
