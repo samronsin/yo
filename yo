@@ -54,7 +54,9 @@ run_codex() {
   local effort="${EFFORT:-medium}"
   local ts_args=()
   [[ -n "$THREAD_SOURCE" ]] && ts_args=(--thread-source "$THREAD_SOURCE")
-  echo "agent=codex model=$model reasoning_effort=$effort thread_source=${THREAD_SOURCE:-default}"
+  # Unset --thread-source means codex's own default, "user" (verified on the
+  # wire for 0.150.x); log the effective value so bisection trails read true.
+  echo "agent=codex model=$model reasoning_effort=$effort thread_source=${THREAD_SOURCE:-user(default)}"
   codex exec \
     "${ts_args[@]}" \
     --ignore-rules \
