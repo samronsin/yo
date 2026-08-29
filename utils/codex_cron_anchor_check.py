@@ -12,7 +12,7 @@ within the last 5h, or with --now), then reads account rate limits twice via
 Also inspects the cron's own log for the silent-failure mode where the ping
 dies before reaching the API (e.g. a flag the installed codex CLI rejects).
 
-Typical use the evening before:  nohup python3 codex_cron_anchor_check.py >/tmp/anchor-check.log 2>&1 &
+Typical use the evening before:  nohup python3 utils/codex_cron_anchor_check.py >/tmp/anchor-check.log 2>&1 &
 """
 
 import argparse
@@ -25,7 +25,7 @@ from pathlib import Path
 
 from codex_gap_anchor_test import DRIFT_TOLERANCE_SECS, WINDOW_SECS, read_rate_limits, utc
 
-ROOT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = Path(__file__).resolve().parent.parent  # repo root
 ATTRIBUTION_TOLERANCE_SECS = 120  # cron starts at :30:01; request lands seconds later
 GRACE_SECS = 90  # after 04:30Z, give the ping time to complete before reading
 

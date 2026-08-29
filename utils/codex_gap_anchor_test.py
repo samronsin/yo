@@ -21,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = Path(__file__).resolve().parent.parent  # repo root
 WINDOW_SECS = 5 * 3600
 DRIFT_TOLERANCE_SECS = 5   # locked resetsAt jitters by ~2s server-side
 OPEN_WINDOW_MARGIN_SECS = 90  # hypothetical window reads ~now+5h; less means real

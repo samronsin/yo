@@ -132,13 +132,13 @@ The server-side rules for which pings anchor a 5h window shift silently (see
 issues #9 and PR #14 for the history); when pings stop anchoring, re-bisect
 rather than trusting old conclusions. Two utilities support that:
 
-- `codex_gap_anchor_test.py [--model M] [--effort E] [--thread-source S]` — fires
+- `utils/codex_gap_anchor_test.py [--model M] [--effort E] [--thread-source S]` — fires
   ONE ping via `./yo codex` in an unanchored gap, then reads account rate
   limits twice (via `codex app-server`, token-free) 120s apart. A real anchor
   locks `resetsAt` at ping+5h; without one it drifts with query time. Change
   one variable per run; an ANCHORED verdict closes the gap for ~5h. Refuses
   to run while a window is open.
-- `codex_cron_anchor_check.py [--cron-time HH:MM] [--now]` — verifies a cron ping
+- `utils/codex_cron_anchor_check.py [--cron-time HH:MM] [--now]` — verifies a cron ping
   anchored: waits for the next firing (or judges the last one), summarizes
   the cron's own log to catch pings that died client-side, then applies the
   same locked-vs-drifting test and attributes the anchor.
