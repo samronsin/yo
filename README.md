@@ -133,11 +133,12 @@ issues #9 and PR #14 for the history); when pings stop anchoring, re-bisect
 rather than trusting old conclusions. Two utilities support that:
 
 - `utils/codex_anchor_probe.py [--model M] [--effort E] [--thread-source S]` — fires
-  ONE ping via `./yo codex` in an unanchored gap, then reads account rate
-  limits twice (via `codex app-server`, token-free) 120s apart. A real anchor
-  locks `resetsAt` at ping+5h; without one it drifts with query time. Change
-  one variable per run; an ANCHORED verdict closes the gap for ~5h. Refuses
-  to run while a window is open.
+  ONE ping via `./yo codex` in an unanchored gap, then takes three account
+  rate-limit reads (via `codex app-server`, token-free): one right after the
+  ping and two more spaced `--wait` seconds apart — about 4 minutes total
+  with the 120s default. A real anchor locks `resetsAt` at ping+5h; without
+  one it drifts with query time. Change one variable per run; an ANCHORED
+  verdict closes the gap for ~5h. Refuses to run while a window is open.
 - `utils/codex_anchor_watch.py [--cron-time HH:MM] [--now]` — verifies a cron ping
   anchored: waits for the next firing (or judges the last one), summarizes
   the cron's own log to catch pings that died client-side, then applies the
