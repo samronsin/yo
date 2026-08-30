@@ -140,9 +140,10 @@ rather than trusting old conclusions. Two utilities support that:
   one it drifts with query time. Change one variable per run; an ANCHORED
   verdict closes the gap for ~5h. Refuses to run while a window is open.
 - `utils/codex_anchor_watch.py [--cron-time HH:MM] [--now]` — verifies a cron ping
-  anchored: waits for the next firing (or judges the last one), summarizes
-  the cron's own log to catch pings that died client-side, then applies the
-  same locked-vs-drifting test and attributes the anchor.
+  anchored: reads the firing times from the installed crontab's yo-codex block
+  (`--cron-time` overrides), waits for the next firing (or judges the last
+  one), summarizes the cron's own log to catch pings that died client-side,
+  then applies the same locked-vs-drifting test and attributes the anchor.
 
 Don't judge anchoring from the Codex web UI — it hides windows at 0% usage.
 
