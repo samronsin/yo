@@ -29,7 +29,7 @@ the hours or agents. See [Usage](#usage) for more.
 - **`yo`** — the runner. Invokes the selected agent CLI once with the prompt
   `yo`, in a read-only/non-interactive mode, and writes the output to a
   per-agent log. The agent is a required first argument (`codex` or `claude`);
-  an optional `--model` flag overrides the per-agent default (GPT-5.4 for
+  an optional `--model` flag overrides the per-agent default (GPT-5.6-terra for
   Codex, Haiku for Claude).
 - **`install.py`** — generates and installs the crontab. Given a timezone and
   working hours, it builds a schedule that re-anchors each agent's 5h usage
@@ -44,7 +44,7 @@ the hours or agents. See [Usage](#usage) for more.
 Run once, ad hoc:
 
 ```sh
-./yo codex                    # Codex, default model (GPT-5.4)
+./yo codex                    # Codex, default model (GPT-5.6-terra)
 ./yo claude                   # Claude, default model (Haiku)
 ./yo claude --model opus      # Claude with an explicit model
 ```
@@ -125,6 +125,26 @@ another timezone), **re-run `install.py`** to re-anchor the schedule.
 
 Written under `logs/` as `yo-<agent>-<timestamp>.log`, with the final message in
 `yo-<agent>.last.txt`.
+
+## Anchor test utilities
+
+The server-side rules for which pings anchor a 5h window shift silently (see
+issues #9 and PR #14 for the history); when pings stop anchoring, re-bisect
+rather than trusting old conclusions. Two utilities support that:
+
+- `utils/codex_anchor_probe.py [--model M] [--effort E] [--thread-source S]` — fires
+  ONE ping via `./yo codex` in an unanchored gap, then takes three account
+  rate-limit reads (via `codex app-server`, token-free): one right after the
+  ping and two more spaced `--wait` seconds apart — about 4 minutes total
+  with the 120s default. A real anchor locks `resetsAt` at ping+5h; without
+  one it drifts with query time. Change one variable per run; an ANCHORED
+  verdict closes the gap for ~5h. Refuses to run while a window is open.
+- `utils/codex_anchor_watch.py [--cron-time HH:MM] [--now]` — verifies a cron ping
+  anchored: waits for the next firing (or judges the last one), summarizes
+  the cron's own log to catch pings that died client-side, then applies the
+  same locked-vs-drifting test and attributes the anchor.
+
+Don't judge anchoring from the Codex web UI — it hides windows at 0% usage.
 
 ## Requirements
 
