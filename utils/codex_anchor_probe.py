@@ -16,6 +16,8 @@ verdict closes the gap for ~5h. Refuses to run while a window is open.
 import argparse
 import datetime
 import json
+import os
+import select
 import subprocess
 import sys
 import time
@@ -33,37 +35,46 @@ def utc(ts: float) -> str:
     )
 
 
-def read_rate_limits() -> dict:
+def read_rate_limits(timeout: float = 30.0) -> dict:
     """Read account rate limits via `codex app-server` (spends no tokens)."""
     proc = subprocess.Popen(
         ["codex", "app-server"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
-        text=True,
     )
     try:
         for req in (
             {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-             "params": {"clientInfo": {"name": "gap-anchor-test", "title": "gap-anchor-test", "version": "0.0.1"}}},
+             "params": {"clientInfo": {"name": "codex-anchor-probe", "title": "codex-anchor-probe", "version": "0.0.1"}}},
             {"jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read", "params": None},
         ):
-            proc.stdin.write(json.dumps(req) + "\n")
+            proc.stdin.write((json.dumps(req) + "\n").encode())
         proc.stdin.flush()
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            line = proc.stdout.readline()
-            if not line:
-                break
-            try:
-                msg = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if msg.get("id") == 2:
-                primary = msg["result"]["rateLimits"]["primary"]
-                return {"read_at": time.time(), "resets_at": primary["resetsAt"],
-                        "used_percent": primary.get("usedPercent")}
-        raise RuntimeError("no rateLimits response within 30s")
+        # select + os.read, never a bare readline(): a stalled app-server that
+        # writes no newline would block readline() forever and the deadline
+        # below would never be checked again.
+        deadline = time.time() + timeout
+        fd = proc.stdout.fileno()
+        buf = b""
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+                raise RuntimeError(f"no rateLimits response within {timeout:.0f}s")
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                raise RuntimeError("codex app-server closed stdout without answering")
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if msg.get("id") == 2:
+                    primary = msg["result"]["rateLimits"]["primary"]
+                    return {"read_at": time.time(), "resets_at": primary["resetsAt"],
+                            "used_percent": primary.get("usedPercent")}
     finally:
         proc.kill()
 
