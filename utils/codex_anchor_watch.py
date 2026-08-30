@@ -27,7 +27,8 @@ from codex_anchor_probe import DRIFT_TOLERANCE_SECS, WINDOW_SECS, read_rate_limi
 
 ROOT_DIR = Path(__file__).resolve().parent.parent  # repo root
 ATTRIBUTION_TOLERANCE_SECS = 120  # cron starts at :30:01; request lands seconds later
-GRACE_SECS = 90  # after 04:30Z, give the ping time to complete before reading
+GRACE_SECS = 90  # after the firing, give the ping time to complete before reading
+SAMPLE_END_MARGIN_SECS = 60  # slack for read round-trips near window expiry
 
 
 def parse_hhmm(s: str) -> tuple[int, int]:
@@ -77,13 +78,30 @@ def main() -> int:
     cron_dt = now.replace(hour=hour, minute=minute, second=1, microsecond=0)
     if cron_dt > now:
         cron_dt -= datetime.timedelta(days=1)
-    # If the last firing's window would already be gone (and --now not forced),
-    # target the next firing instead and sleep until just after it.
-    if not args.now and (now - cron_dt).total_seconds() > WINDOW_SECS:
-        cron_dt += datetime.timedelta(days=1)
-        wake = cron_dt.timestamp() + GRACE_SECS
-        say(f"waiting for the {cron_dt:%Y-%m-%d %H:%M}Z cron; sleeping until {utc(wake)}...")
-        time.sleep(max(0, wake - time.time()))
+    # A firing is only judgeable inside its usable sampling window: from
+    # GRACE_SECS after the firing (the ping must have finished, or read #1
+    # races it) until early enough that BOTH reads complete before the
+    # would-be window expires at cron+5h (past that, an anchored window
+    # expires between reads and the drift check yields a false NOT ANCHORED).
+    def sampling_window(dt: datetime.datetime) -> tuple[float, float]:
+        start = dt.timestamp() + GRACE_SECS
+        end = dt.timestamp() + WINDOW_SECS - args.wait - SAMPLE_END_MARGIN_SECS
+        return start, end
+
+    sample_start, sample_end = sampling_window(cron_dt)
+    if time.time() > sample_end:
+        if args.now:
+            say("WARNING: past the usable sampling window for this firing "
+                f"(ended {utc(sample_end)}); its 5h window expires before or "
+                "while we read, so the verdict may be a false NOT ANCHORED.")
+        else:
+            cron_dt += datetime.timedelta(days=1)
+            sample_start, _ = sampling_window(cron_dt)
+            say(f"last firing no longer judgeable; waiting for the "
+                f"{cron_dt:%Y-%m-%d %H:%M}Z cron...")
+    if time.time() < sample_start:
+        say(f"sleeping until {utc(sample_start)} (ping settled)...")
+        time.sleep(max(0, sample_start - time.time()))
 
     cron_ts = cron_dt.timestamp()
     say(f"judging cron firing at {utc(cron_ts)}")
