@@ -18,11 +18,11 @@ cd yo
 ./yo claude                 # smoke-test: one ping now, reply in logs/
 
 # install a daily schedule anchored to your working hours
-./install.py --tz Europe/Paris --hours 9-18 --agent claude
+./install.py --tz Europe/Paris --hours 9-18 --command claude
 ```
 
 That's it — `cron` now pings on schedule. Re-run `install.py` any time to change
-the hours or agents. See [Usage](#usage) for more.
+the hours or commands. See [Usage](#usage) for more.
 
 ## Components
 
@@ -54,8 +54,8 @@ Install a schedule (review the snippet, confirm, and it's added to your crontab)
 One command per run — for several, run it once each:
 
 ```sh
-./install.py --tz Europe/Paris --hours 9-18 --agent codex
-./install.py --tz Europe/Paris --hours 9-18 --agent claude
+./install.py --tz Europe/Paris --hours 9-18 --command codex
+./install.py --tz Europe/Paris --hours 9-18 --command claude
 ```
 
 Each command gets its own marked block in the crontab, so installing one leaves
@@ -88,9 +88,9 @@ command (each lands in its own block, so they coexist). Bare `codex`/`claude`
 still infer themselves:
 
 ```sh
-./install.py ... --agent codex-pro     --backend codex
-./install.py ... --agent codex-perso   --backend codex
-./install.py ... --agent claude-perso  --backend claude
+./install.py ... --command codex-pro     --backend codex
+./install.py ... --command codex-perso   --backend codex
+./install.py ... --command claude-perso  --backend claude
 ```
 
 A custom name with no `--backend` is rejected, since the runner is unknown.
@@ -160,8 +160,8 @@ another timezone), **re-run `install.py`** to re-anchor the schedule.
 
 ## Logs
 
-Written under `logs/` as `yo-<agent>-<timestamp>.log`, with the final message in
-`yo-<agent>.last.txt`.
+Written under `logs/` as `yo-<command>-<timestamp>.log`, with the final message
+in `yo-<command>.last.txt`.
 
 ## Anchor test utilities
 

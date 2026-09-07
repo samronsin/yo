@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 ROOT_DIR = Path(__file__).parent.resolve()
 JOB_CMD = str(ROOT_DIR / "yo")
 # cron runs with a bare PATH; this is the baseline we give it. The directories
-# where the selected agents actually resolve get prepended at install time (see
+# where the selected commands actually resolve get prepended at install time (see
 # cron_path_for), so the jobs find their CLI wherever it lives.
 BASE_CRON_PATH = f"{Path.home() / '.local/bin'}:/usr/local/bin:/usr/bin:/bin"
 
@@ -33,11 +33,11 @@ STAGGER_MINUTES = 2
 DEFAULT_WINDOW_HOURS = 5
 DEFAULT_NUM_WINDOWS = 3
 
-# Sentinel markers delimiting a managed block. They're namespaced per agent so
-# re-installing one agent replaces only its own block, letting codex and claude
-# schedules coexist (install once per agent).
-def markers(agent):
-    return f"# >>> yo-{agent} >>>", f"# <<< yo-{agent} <<<"
+# Sentinel markers delimiting a managed block. They're namespaced per command so
+# re-installing one command replaces only its own block, letting schedules
+# coexist (install once per command).
+def markers(command):
+    return f"# >>> yo-{command} >>>", f"# <<< yo-{command} <<<"
 
 
 def positive_int(value):
@@ -59,11 +59,11 @@ COMMAND_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def command_name(value):
-    """argparse `type=` converter for --agent: validate the command's charset.
+    """argparse `type=` converter for --command: validate the command's charset.
 
     An argparse `type=` callable receives the raw string and its return value
-    becomes the parsed argument (here args.agent), so this validates and returns
-    `value` unchanged -- no conversion, but the return is what argparse stores.
+    becomes the parsed argument, so this validates and returns `value`
+    unchanged -- no conversion, but the return is what argparse stores.
     The command is what `yo` invokes and the crontab marker / log key; it's
     restricted so it stays safe unquoted in the crontab line it's written to.
     The runner backend is a separate --backend (see resolve_backend), mirroring
@@ -102,7 +102,7 @@ def resolve_backend(command, backend):
     return backend
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Install yo cron jobs")
     parser.add_argument("--tz", required=True, help="Timezone, e.g. Europe/Paris")
     parser.add_argument("--hours", required=True, help="Working hours as START-END (24h), e.g. 9-18")
@@ -110,16 +110,16 @@ def parse_args():
                         metavar=str(DEFAULT_WINDOW_HOURS), help="Hours each run covers")
     parser.add_argument("--num-windows", type=positive_int, default=DEFAULT_NUM_WINDOWS,
                         metavar=str(DEFAULT_NUM_WINDOWS), help="Number of runs per day")
-    parser.add_argument("--agent", required=True, type=command_name, metavar="NAME",
+    parser.add_argument("--command", required=True, type=command_name, metavar="NAME",
                         help="Command to run: a backend (codex/claude), or a "
                              "custom command whose runner is given by --backend "
                              "(e.g. codex-pro). Run once per command; each gets "
                              "its own crontab block.")
     parser.add_argument("--backend", choices=BACKENDS,
-                        help="Runner backend for a custom --agent; a backend "
+                        help="Runner backend for a custom --command; a backend "
                              "name (codex/claude) is its own backend")
     parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def hour_minute(t):
@@ -195,18 +195,18 @@ def to_system_times(run_times, tz):
     return out
 
 
-def cron_path_for(agents):
-    """Build the cron PATH so the jobs find each agent's CLI where it lives.
+def cron_path_for(commands):
+    """Build the cron PATH so the jobs find each command where it lives.
 
-    Resolves each agent in the installer's environment (erroring if one is
+    Resolves each command in the installer's environment (erroring if one is
     missing) and prepends the directory it was found in to BASE_CRON_PATH, so
     cron's PATH points at the real location rather than a hardcoded guess.
     """
     dirs = []
-    for agent in agents:
-        location = shutil.which(agent)
+    for command in commands:
+        location = shutil.which(command)
         if location is None:
-            sys.exit(f"error: '{agent}' not found on PATH; install it before scheduling")
+            sys.exit(f"error: '{command}' not found on PATH; install it before scheduling")
         dirs.append(str(Path(location).parent))
     return ":".join(dict.fromkeys(dirs + BASE_CRON_PATH.split(":")))
 
@@ -269,7 +269,7 @@ def main(args):
         )
         end += 24  # working hours wrap past midnight (e.g. night shift 22-6)
 
-    command = args.agent
+    command = args.command
     backend = resolve_backend(command, args.backend)
     cron_path = cron_path_for([command])  # resolves the command; errors if it's missing
 

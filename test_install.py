@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Unit tests for install helpers."""
 import argparse
+import io
 import os
 import time
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 from unittest import mock
 
 import install
@@ -137,6 +138,21 @@ class ResolveBackendTest(unittest.TestCase):
     def test_custom_command_without_backend_exits(self):
         with self.assertRaises(SystemExit):
             resolve_backend("work-ai", None)
+
+
+class ParseArgsTest(unittest.TestCase):
+    def _parse(self, *args):
+        return install.parse_args(["--tz", "Europe/Paris", "--hours", "9-18", *args])
+
+    def test_command_flag_parsed(self):
+        args = self._parse("--command", "codex-pro", "--backend", "codex")
+        self.assertEqual(args.command, "codex-pro")
+        self.assertEqual(args.backend, "codex")
+
+    def test_command_required(self):
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self._parse()
 
 
 class RenderCronTest(unittest.TestCase):
