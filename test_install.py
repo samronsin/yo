@@ -3,18 +3,24 @@
 import argparse
 import io
 import os
+import subprocess
 import time
 import unittest
-from contextlib import contextmanager, redirect_stderr
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from unittest import mock
 
 import install
 from install import (
     BASE_CRON_PATH,
+    MalformedCrontab,
     command_name,
     cron_path_for,
+    format_status,
     hour_minute,
+    installed_jobs,
+    parse_cron_entry,
     render_cron,
+    remove_managed_block,
     resolve_backend,
     to_system_times,
 )
@@ -142,17 +148,153 @@ class ResolveBackendTest(unittest.TestCase):
 
 class ParseArgsTest(unittest.TestCase):
     def _parse(self, *args):
-        return install.parse_args(["--tz", "Europe/Paris", "--hours", "9-18", *args])
+        return install.parse_args([*args])
+
+    def _install_parse(self, *args):
+        return self._parse("--tz", "Europe/Paris", "--hours", "9-18", *args)
 
     def test_command_flag_parsed(self):
-        args = self._parse("--command", "codex-pro", "--backend", "codex")
+        args = self._install_parse("--command", "codex-pro", "--backend", "codex")
         self.assertEqual(args.command, "codex-pro")
         self.assertEqual(args.backend, "codex")
 
-    def test_command_required(self):
-        with redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit):
-                self._parse()
+    def test_status_does_not_require_install_args(self):
+        args = self._parse("--status")
+        self.assertTrue(args.status)
+        self.assertIsNone(args.command)
+
+    def test_install_args_required(self):
+        # All missing flags are reported at once, and only the missing ones.
+        for argv, expected in (((), "--tz, --hours, --command"),
+                               (("--tz", "Europe/Paris", "--hours", "9-18"), "--command")):
+            with self.subTest(argv=argv):
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as cm:
+                        self._parse(*argv)
+                self.assertEqual(cm.exception.code, 2)
+                self.assertIn(f"required: {expected}\n", stderr.getvalue())
+
+
+class ManagedBlocksTest(unittest.TestCase):
+    CRONTAB = (
+        "MAILTO=me@example.com\n"
+        + render_cron([6, 11 + 2 / 60], "Europe/Paris", "codex", "codex", "/bin")
+        + "15 9 * * * echo unmanaged\n"
+        + render_cron([16 + 4 / 60], "Europe/Paris", "codex-pro", "codex", "/opt/bin:/bin")
+    )
+
+    def test_installed_jobs_round_trips_rendered_blocks(self):
+        # The PATH= and comment lines inside each block aren't entries.
+        self.assertEqual(installed_jobs(self.CRONTAB), [
+            ("codex", [("0 6 * * *", f"{install.JOB_CMD} codex"),
+                       ("2 11 * * *", f"{install.JOB_CMD} codex")]),
+            ("codex-pro", [("4 16 * * *", f"{install.JOB_CMD} codex-pro --backend codex")]),
+        ])
+
+    def test_remove_managed_block_keeps_everything_else(self):
+        kept = remove_managed_block(self.CRONTAB, "codex")
+        self.assertNotIn("# >>> yo-codex >>>", kept)
+        self.assertNotIn(f"2 11 * * * {install.JOB_CMD} codex", kept)
+        for line in ("MAILTO=me@example.com", "15 9 * * * echo unmanaged",
+                     "# >>> yo-codex-pro >>>", "# <<< yo-codex-pro <<<"):
+            self.assertIn(line, kept)
+        self.assertEqual(remove_managed_block("", "codex"), [])
+
+    def test_malformed_blocks_are_refused(self):
+        # Guessing where a broken block ends could drop the user's own lines, so
+        # both status and install refuse instead.
+        block = "# >>> yo-codex >>>\n0 6 * * * /repo/yo codex\n"
+        for name, crontab in (
+            ("unterminated", block + "15 9 * * * echo mine\n"),
+            ("nested begin", block + "# >>> yo-codex-pro >>>\n# <<< yo-codex-pro <<<\n# <<< yo-codex <<<\n"),
+            ("other command's end", block + "# <<< yo-other <<<\n"),
+        ):
+            with self.subTest(name):
+                with self.assertRaises(MalformedCrontab):
+                    installed_jobs(crontab)
+                with self.assertRaises(MalformedCrontab):
+                    remove_managed_block(crontab, "codex")
+
+    def test_markers_must_match_exactly(self):
+        # An indented marker is just a comment to install.py (as it is to cron's
+        # eyes, which still runs the lines), so the block isn't managed.
+        crontab = " # >>> yo-codex >>>\n0 6 * * * /repo/yo codex\n # <<< yo-codex <<<\n"
+        self.assertEqual(installed_jobs(crontab), [])
+        self.assertEqual(len(remove_managed_block(crontab, "codex")), 3)
+
+    def test_parse_cron_entry(self):
+        self.assertEqual(parse_cron_entry("0 6 * * * /repo/yo codex  \t"),
+                         ("0 6 * * *", "/repo/yo codex"))
+        self.assertEqual(parse_cron_entry("*/15 9-17 * * mon-fri /repo/yo codex --backend codex"),
+                         ("*/15 9-17 * * mon-fri", "/repo/yo codex --backend codex"))
+        for other in ("", "   ", "# a comment with several words in it",
+                      "PATH=/usr/local/bin:/usr/bin:/bin a b c d e",
+                      "MAILTO = someone with a long address here",
+                      "@daily /repo/yo codex a b c d"):
+            self.assertIsNone(parse_cron_entry(other), other)
+
+
+class StatusTest(unittest.TestCase):
+    def test_format_status(self):
+        # Logs are located from the installed yo's own path, not this checkout.
+        crontab = ("# >>> yo-codex-pro >>>\n"
+                   "0 6 * * * /moved/yo codex-pro --backend codex\n"
+                   "*/15 9-17 * * 1-5 /moved/yo codex-pro --backend codex\n"
+                   "# <<< yo-codex-pro <<<\n")
+        self.assertEqual(format_status(installed_jobs(crontab)), (
+            "Installed yo cron jobs:\n"
+            "\n"
+            "codex-pro\n"
+            "  schedule: 06:00, */15 9-17 * * 1-5 system time\n"
+            "  command:  /moved/yo codex-pro --backend codex\n"
+            "  logs:     /moved/logs/yo-codex-pro-<timestamp>.log\n"
+            "  last:     /moved/logs/yo-codex-pro.last.txt\n"
+        ))
+
+    def test_format_status_block_without_entries(self):
+        text = format_status(installed_jobs("# >>> yo-codex >>>\n# <<< yo-codex <<<\n"))
+        self.assertIn("  schedule: (no cron entries)\n", text)
+        self.assertIn(f"  logs:     {install.ROOT_DIR}/logs/yo-codex-<timestamp>.log\n", text)
+
+    def test_format_status_when_empty(self):
+        self.assertEqual(format_status([]), "No yo cron jobs installed.\n")
+
+    def test_status_reads_crontab(self):
+        crontab = render_cron([6], "Europe/Paris", "codex", "codex", "/bin")
+        completed = subprocess.CompletedProcess(["crontab", "-l"], 0, crontab, "")
+        with mock.patch("install.shutil.which", return_value="/usr/bin/crontab"):
+            with mock.patch("install.subprocess.run", return_value=completed):
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    install.main(install.parse_args(["--status"]))
+        self.assertIn("\ncodex\n  schedule: 06:00 system time\n", out.getvalue())
+
+    def test_install_rejects_malformed_block_before_prompt(self):
+        args = install.parse_args(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex"])
+        with mock.patch("install.shutil.which", return_value="/usr/bin/codex"):
+            with mock.patch("install.read_crontab", return_value="# >>> yo-codex >>>\n"):
+                with mock.patch("builtins.input") as input_mock:
+                    with self.assertRaises(SystemExit) as cm:
+                        install.main(args)
+        self.assertIn("missing its end marker", str(cm.exception))
+        input_mock.assert_not_called()
+
+    def test_install_merges_into_crontab_as_of_confirmation(self):
+        # The user may edit the crontab while reviewing the prompt; the merge
+        # must build on what's there after they confirm, not the preflight read.
+        args = install.parse_args(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex"])
+        before, after = "15 9 * * * echo before\n", "15 9 * * * echo after\n"
+        with mock.patch("install.shutil.which", return_value="/usr/bin/codex"):
+            with mock.patch("install.read_crontab", side_effect=[before, after]):
+                with mock.patch("builtins.input", return_value="y"):
+                    with mock.patch("install.subprocess.run") as run_mock:
+                        with redirect_stdout(io.StringIO()):
+                            install.main(args)
+        merged = run_mock.call_args.kwargs["input"]
+        self.assertTrue(merged.startswith(after))
+        self.assertNotIn("before", merged)
+        self.assertIn("# >>> yo-codex >>>", merged)
 
 
 class RenderCronTest(unittest.TestCase):

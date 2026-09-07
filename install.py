@@ -35,7 +35,7 @@ DEFAULT_NUM_WINDOWS = 3
 
 # Sentinel markers delimiting a managed block. They're namespaced per command so
 # re-installing one command replaces only its own block, letting schedules
-# coexist (install once per command).
+# coexist (install once per command). MARKER_RE (below) is the reverse mapping.
 def markers(command):
     return f"# >>> yo-{command} >>>", f"# <<< yo-{command} <<<"
 
@@ -104,22 +104,31 @@ def resolve_backend(command, backend):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Install yo cron jobs")
-    parser.add_argument("--tz", required=True, help="Timezone, e.g. Europe/Paris")
-    parser.add_argument("--hours", required=True, help="Working hours as START-END (24h), e.g. 9-18")
+    parser.add_argument("--status", action="store_true",
+                        help="Show the installed yo cron jobs and exit")
+    parser.add_argument("--tz", help="Timezone, e.g. Europe/Paris (required to install)")
+    parser.add_argument("--hours", help="Working hours as START-END (24h), e.g. 9-18 (required to install)")
     parser.add_argument("--window-hours", type=positive_int, default=DEFAULT_WINDOW_HOURS,
                         metavar=str(DEFAULT_WINDOW_HOURS), help="Hours each run covers")
     parser.add_argument("--num-windows", type=positive_int, default=DEFAULT_NUM_WINDOWS,
                         metavar=str(DEFAULT_NUM_WINDOWS), help="Number of runs per day")
-    parser.add_argument("--command", required=True, type=command_name, metavar="NAME",
-                        help="Command to run: a backend (codex/claude), or a "
-                             "custom command whose runner is given by --backend "
-                             "(e.g. codex-pro). Run once per command; each gets "
-                             "its own crontab block.")
+    parser.add_argument("--command", type=command_name, metavar="NAME",
+                        help="Command to run (required to install): a backend "
+                             "(codex/claude), or a custom command whose runner is "
+                             "given by --backend (e.g. codex-pro). Run once per "
+                             "command; each gets its own crontab block.")
     parser.add_argument("--backend", choices=BACKENDS,
                         help="Runner backend for a custom --command; a backend "
                              "name (codex/claude) is its own backend")
     parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    # --status is a read-only query mode; the schedule flags are only required to
+    # install. (If a third mode ever lands, switch to subcommands instead.)
+    required = (("--tz", args.tz), ("--hours", args.hours), ("--command", args.command))
+    missing = [flag for flag, value in required if value is None]
+    if missing and not args.status:
+        parser.error(f"the following arguments are required: {', '.join(missing)}")
+    return args
 
 
 def hour_minute(t):
@@ -248,9 +257,123 @@ def render_cron(system_times, tz, command, backend, cron_path):
     return "\n".join(lines) + "\n"
 
 
-def main(args):
+def read_crontab():
+    """The user's current crontab text ("" if they have none)."""
     if shutil.which("crontab") is None:
         sys.exit("error: 'crontab' not found on PATH; install cron (e.g. 'apt install cron') and ensure the service is running")
+    existing = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    if existing.returncode != 0 and "no crontab for" not in existing.stderr.lower():
+        sys.exit(f"error: 'crontab -l' failed: {existing.stderr.strip() or existing.returncode}")
+    return existing.stdout
+
+
+# Matches either marker line written by markers(); group 1 tells begin (>>>)
+# from end (<<<), group 2 is the command.
+MARKER_RE = re.compile(rf"# (>>>|<<<) yo-({COMMAND_NAME_RE.pattern}) \1")
+
+
+class MalformedCrontab(Exception):
+    """A yo-managed block has broken markers, so its extent can't be trusted."""
+
+
+def split_managed_blocks(crontab):
+    """Split crontab text into (command, lines) segments.
+
+    `command` is None for runs of the user's own lines and the block's command
+    for a yo-managed block (markers included). A block that's unterminated or
+    contains another marker raises MalformedCrontab rather than guessing where
+    it ends, since a wrong guess could drop lines the user wrote.
+    """
+    segments, command, lines = [], None, []
+    for line in crontab.splitlines():
+        m = MARKER_RE.fullmatch(line)
+        if command is None and m and m[1] == ">>>":
+            if lines:
+                segments.append((None, lines))
+            command, lines = m[2], [line]
+        elif command is not None and m:
+            if (m[1], m[2]) != ("<<<", command):
+                raise MalformedCrontab(f"yo-{command} block contains an unexpected marker: {line}")
+            segments.append((command, lines + [line]))
+            command, lines = None, []
+        else:
+            lines.append(line)
+    if command is not None:
+        raise MalformedCrontab(f"yo-{command} block is missing its end marker")
+    if lines:
+        segments.append((None, lines))
+    return segments
+
+
+def remove_managed_block(crontab, command):
+    """The crontab's lines without `command`'s managed block (other blocks stay)."""
+    kept = [line for owner, lines in split_managed_blocks(crontab) if owner != command
+            for line in lines]
+    while kept and not kept[-1].strip():  # avoid blank-line pile-up across runs
+        kept.pop()
+    return kept
+
+
+# A cron schedule field: digits, names, `*`, ranges, lists, steps. Excludes the
+# other line shapes cron allows (comments, NAME=value, @reboot-style shortcuts).
+CRON_FIELD_RE = re.compile(r"[\w*,/-]+")
+
+
+def parse_cron_entry(line):
+    """Split a cron job line into (schedule, command); None for any other line."""
+    parts = line.split(None, 5)
+    if len(parts) != 6 or not all(CRON_FIELD_RE.fullmatch(f) for f in parts[:5]):
+        return None
+    return " ".join(parts[:5]), parts[5].strip()
+
+
+def describe_schedule(schedule):
+    """A daily `M H * * *` schedule (what render_cron writes) as HH:MM; others as written."""
+    m = re.fullmatch(r"(\d{1,2}) (\d{1,2}) \* \* \*", schedule)
+    return f"{int(m[2]):02d}:{int(m[1]):02d}" if m else schedule
+
+
+def installed_jobs(crontab):
+    """[(command, [(schedule, command_line), ...]), ...] for each yo-managed block."""
+    return [
+        (command, [entry for entry in map(parse_cron_entry, lines) if entry])
+        for command, lines in split_managed_blocks(crontab)
+        if command is not None
+    ]
+
+
+def format_status(jobs):
+    """Render installed_jobs() for a human."""
+    if not jobs:
+        return "No yo cron jobs installed.\n"
+    out = ["Installed yo cron jobs:"]
+    for command, entries in jobs:
+        schedule = ", ".join(describe_schedule(s) for s, _ in entries)
+        command_lines = list(dict.fromkeys(line for _, line in entries))
+        # yo logs next to itself (see LOG_DIR in yo), so locate the logs from the
+        # installed yo's path rather than this checkout's.
+        yo_path = Path(command_lines[0].split()[0]) if command_lines else ROOT_DIR / "yo"
+        log_dir = yo_path.parent / "logs"
+        out += ["", command,
+                f"  schedule: {schedule} system time" if schedule else "  schedule: (no cron entries)",
+                *(f"  command:  {line}" for line in command_lines),
+                f"  logs:     {log_dir / f'yo-{command}-<timestamp>.log'}",
+                f"  last:     {log_dir / f'yo-{command}.last.txt'}"]
+    return "\n".join(out) + "\n"
+
+
+def main(args):
+    try:
+        if args.status:
+            print(format_status(installed_jobs(read_crontab())), end="")
+        else:
+            install_schedule(args)
+    except MalformedCrontab as exc:
+        sys.exit(f"error: {exc}; fix it by hand (crontab -e) and retry")
+
+
+def install_schedule(args):
+    crontab = read_crontab()  # fails fast when crontab isn't available
 
     try:
         ZoneInfo(args.tz)
@@ -272,6 +395,8 @@ def main(args):
     command = args.command
     backend = resolve_backend(command, args.backend)
     cron_path = cron_path_for([command])  # resolves the command; errors if it's missing
+    # Preflight: a malformed crontab should fail before the user approves anything.
+    remove_managed_block(crontab, command)
 
     # The windowed schedule should cover the working day; warn if it can't.
     coverage = args.num_windows * args.window_hours
@@ -303,24 +428,10 @@ def main(args):
         if reply.strip().lower() not in ("y", "yes"):
             sys.exit("Aborted; nothing changed.")
 
-    existing = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-    if existing.returncode != 0 and "no crontab for" not in existing.stderr.lower():
-        sys.exit(f"error: 'crontab -l' failed: {existing.stderr.strip() or existing.returncode}")
-
     # Drop only this command's block, so re-running replaces it while leaving
-    # other commands' blocks (and the user's own lines) untouched.
-    begin, end = markers(command)
-    kept, skipping = [], False
-    for line in existing.stdout.splitlines():
-        if line == begin:
-            skipping = True
-        elif line == end:
-            skipping = False
-        elif not skipping:
-            kept.append(line)
-    while kept and not kept[-1].strip():  # avoid blank-line pile-up across runs
-        kept.pop()
-
+    # other commands' blocks (and the user's own lines) untouched. Re-read now:
+    # the crontab may have changed while the user was reviewing the prompt.
+    kept = remove_managed_block(read_crontab(), command)
     merged = "\n".join(kept) + ("\n" if kept else "") + cron_content
     subprocess.run(["crontab", "-"], input=merged, text=True, check=True)
     print("Crontab updated.")
