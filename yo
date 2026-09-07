@@ -4,24 +4,29 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 PROMPT="yo"
 
-usage() { echo "usage: $(basename "$0") <codex|claude> [--model MODEL] [--effort EFFORT] [--thread-source SOURCE]" >&2; exit 2; }
+usage() { echo "usage: $(basename "$0") <command> [--backend codex|claude] [--model MODEL] [--effort EFFORT] [--thread-source SOURCE]" >&2; exit 2; }
 
-# Args: required first is the CLI to drive ("codex" or "claude", e.g.
-# `yo claude`); optional --model/--effort/--thread-source override the
-# defaults (codex only for the latter two) so utils/codex_anchor_probe.py can vary
-# them through this script instead of duplicating the codex invocation.
-# Validate before logging so a bad/missing arg fails fast to stderr.
-AGENT="${1:-}"
-case "$AGENT" in
-  codex|claude) shift ;;
-  *) usage ;;
-esac
+# Args: required first is the CLI command to invoke. It's either a canonical
+# backend name ("codex"/"claude", e.g. `yo claude`) or any command pointing at a
+# separate auth/config context ("codex-pro", "claude-perso"). --backend selects which
+# runner flags to apply and is required unless the command is itself a backend
+# name (then it's inferred), so the command name is free. COMMAND stays the
+# actual command invoked and the per-command log/crontab key, so several
+# coexist. Optional --model/--effort/--thread-source override the defaults (codex
+# only for the latter two) so utils/codex_anchor_probe.py can vary them through
+# this script instead of duplicating the codex invocation. Validate before
+# logging so a bad/missing arg fails fast to stderr.
+COMMAND="${1:-}"
+[[ -n "$COMMAND" && "$COMMAND" != -* ]] || usage
+shift
 
+BACKEND=""
 MODEL=""
 EFFORT=""
 THREAD_SOURCE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --backend)       [[ $# -ge 2 ]] || usage; BACKEND="$2"; shift 2 ;;
     --model)         [[ $# -ge 2 ]] || usage; MODEL="$2"; shift 2 ;;
     --effort)        [[ $# -ge 2 ]] || usage; EFFORT="$2"; shift 2 ;;
     --thread-source) [[ $# -ge 2 ]] || usage; THREAD_SOURCE="$2"; shift 2 ;;
@@ -29,13 +34,34 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Logs are named per CLI so codex and claude runs stay separate.
+# Resolve the backend (mirrors install.py's resolve_backend): a command that is
+# itself a backend name is its own backend, and an explicit --backend must
+# agree with it -- a conflicting one is a usage error, not a silent run through
+# the wrong runner. Any other command needs --backend, since we can't tell which
+# runner flags to apply otherwise.
+case "$COMMAND" in
+  codex|claude)
+    if [[ -n "$BACKEND" && "$BACKEND" != "$COMMAND" ]]; then
+      echo "error: command '$COMMAND' runs the $COMMAND backend, but --backend $BACKEND was given; drop --backend or pass --backend $COMMAND" >&2; exit 2
+    fi
+    BACKEND="$COMMAND"
+    ;;
+  *)
+    [[ -n "$BACKEND" ]] || { echo "error: --backend (codex|claude) is required for command '$COMMAND'" >&2; exit 2; }
+    ;;
+esac
+case "$BACKEND" in
+  codex|claude) ;;
+  *) echo "error: --backend must be 'codex' or 'claude', got '$BACKEND'" >&2; exit 2 ;;
+esac
+
+# Logs are named per command so separate runs stay separate.
 LOG_DIR="$ROOT_DIR/logs"
-LAST_MESSAGE_FILE="$LOG_DIR/yo-$AGENT.last.txt"
+LAST_MESSAGE_FILE="$LOG_DIR/yo-$COMMAND.last.txt"
 
 mkdir -p "$LOG_DIR"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-log_file="$LOG_DIR/yo-$AGENT-$timestamp.log"
+log_file="$LOG_DIR/yo-$COMMAND-$timestamp.log"
 
 run_codex() {
   # Anchoring the 5h usage window is model-dependent (single-variable A/B
@@ -56,8 +82,8 @@ run_codex() {
   [[ -n "$THREAD_SOURCE" ]] && ts_args=(--thread-source "$THREAD_SOURCE")
   # Unset --thread-source means codex's own default, "user" (verified on the
   # wire for 0.150.x); log the effective value so bisection trails read true.
-  echo "agent=codex model=$model reasoning_effort=$effort thread_source=${THREAD_SOURCE:-user(default)}"
-  codex exec \
+  echo "agent=$COMMAND backend=codex model=$model reasoning_effort=$effort thread_source=${THREAD_SOURCE:-user(default)}"
+  "$COMMAND" exec \
     "${ts_args[@]}" \
     --ignore-rules \
     --skip-git-repo-check \
@@ -78,12 +104,12 @@ run_codex() {
 
 run_claude() {
   local model="${MODEL:-haiku}" rc
-  echo "agent=claude model=$model"
+  echo "agent=$COMMAND backend=claude model=$model"
   # --print: non-interactive. default permission mode keeps it non-blocking and
   # read-only (in print mode an unpermitted tool call is denied, not prompted).
   # stdout is the final message; capture it, then echo into the log. Capture
   # claude's exit code before cat so we report the real status.
-  claude \
+  "$COMMAND" \
     --print \
     --model "$model" \
     --output-format text \
@@ -101,7 +127,7 @@ run_claude() {
   cd "$ROOT_DIR"
 
   set +e
-  case "$AGENT" in
+  case "$BACKEND" in
     codex)  run_codex ;;
     claude) run_claude ;;
   esac

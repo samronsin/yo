@@ -10,6 +10,7 @@ portable per-crontab timezone -- see to_system_times), a cron entry is
 installed at each, then the resulting crontab is printed.
 """
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -20,7 +21,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 ROOT_DIR = Path(__file__).parent.resolve()
 JOB_CMD = str(ROOT_DIR / "yo")
 # cron runs with a bare PATH; this is the baseline we give it. The directories
-# where the selected agents actually resolve get prepended at install time (see
+# where the selected commands actually resolve get prepended at install time (see
 # cron_path_for), so the jobs find their CLI wherever it lives.
 BASE_CRON_PATH = f"{Path.home() / '.local/bin'}:/usr/local/bin:/usr/bin:/bin"
 
@@ -32,11 +33,11 @@ STAGGER_MINUTES = 2
 DEFAULT_WINDOW_HOURS = 5
 DEFAULT_NUM_WINDOWS = 3
 
-# Sentinel markers delimiting a managed block. They're namespaced per agent so
-# re-installing one agent replaces only its own block, letting codex and claude
-# schedules coexist (install once per agent).
-def markers(agent):
-    return f"# >>> yo-{agent} >>>", f"# <<< yo-{agent} <<<"
+# Sentinel markers delimiting a managed block. They're namespaced per command so
+# re-installing one command replaces only its own block, letting schedules
+# coexist (install once per command).
+def markers(command):
+    return f"# >>> yo-{command} >>>", f"# <<< yo-{command} <<<"
 
 
 def positive_int(value):
@@ -47,7 +48,61 @@ def positive_int(value):
     return ivalue
 
 
-def parse_args():
+# Backends whose runner flags `yo` knows.
+BACKENDS = ("codex", "claude")
+
+# A command name goes unquoted into the crontab line (run by cron's /bin/sh),
+# the block markers, and the log filename, so restrict it to a conservative
+# shell- and path-safe set -- an executable resolvable on PATH never needs more.
+# Must start alphanumeric so it can't be read as a flag or a dotfile.
+COMMAND_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def command_name(value):
+    """argparse `type=` converter for --command: validate the command's charset.
+
+    An argparse `type=` callable receives the raw string and its return value
+    becomes the parsed argument, so this validates and returns `value`
+    unchanged -- no conversion, but the return is what argparse stores.
+    The command is what `yo` invokes and the crontab marker / log key; it's
+    restricted so it stays safe unquoted in the crontab line it's written to.
+    The runner backend is a separate --backend (see resolve_backend), mirroring
+    `yo <command> --backend ...`.
+    """
+    if value == "":
+        raise argparse.ArgumentTypeError("empty command name")
+    if not COMMAND_NAME_RE.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            f"command name '{value}' must start with a letter or digit and use "
+            f"only letters, digits, '.', '_', '-' (it's written unquoted into "
+            f"the crontab)")
+    return value
+
+
+def resolve_backend(command, backend):
+    """Decide the runner backend for `command`.
+
+    A bare backend name ("codex"/"claude") is its own backend; if --backend is
+    also given it must agree. Any other command requires --backend, since we
+    can't tell which runner flags to apply otherwise.
+
+    Args:
+        command: The command to run (see command_name).
+        backend: The --backend value (a backend name), or None.
+
+    Returns:
+        The resolved backend name; exits with an error if it can't be decided.
+    """
+    if command in BACKENDS:
+        if backend is not None and backend != command:
+            sys.exit(f"error: command '{command}' runs the {command} backend, but --backend {backend} was given; drop --backend or pass --backend {command}")
+        return command
+    if backend is None:
+        sys.exit(f"error: '{command}' is a custom command; pass --backend codex|claude")
+    return backend
+
+
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Install yo cron jobs")
     parser.add_argument("--tz", required=True, help="Timezone, e.g. Europe/Paris")
     parser.add_argument("--hours", required=True, help="Working hours as START-END (24h), e.g. 9-18")
@@ -55,10 +110,16 @@ def parse_args():
                         metavar=str(DEFAULT_WINDOW_HOURS), help="Hours each run covers")
     parser.add_argument("--num-windows", type=positive_int, default=DEFAULT_NUM_WINDOWS,
                         metavar=str(DEFAULT_NUM_WINDOWS), help="Number of runs per day")
-    parser.add_argument("--agent", nargs="+", required=True, choices=("codex", "claude"),
-                        help="Agent CLI(s) to run, one block each")
+    parser.add_argument("--command", required=True, type=command_name, metavar="NAME",
+                        help="Command to run: a backend (codex/claude), or a "
+                             "custom command whose runner is given by --backend "
+                             "(e.g. codex-pro). Run once per command; each gets "
+                             "its own crontab block.")
+    parser.add_argument("--backend", choices=BACKENDS,
+                        help="Runner backend for a custom --command; a backend "
+                             "name (codex/claude) is its own backend")
     parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def hour_minute(t):
@@ -134,23 +195,23 @@ def to_system_times(run_times, tz):
     return out
 
 
-def cron_path_for(agents):
-    """Build the cron PATH so the jobs find each agent's CLI where it lives.
+def cron_path_for(commands):
+    """Build the cron PATH so the jobs find each command where it lives.
 
-    Resolves each agent in the installer's environment (erroring if one is
+    Resolves each command in the installer's environment (erroring if one is
     missing) and prepends the directory it was found in to BASE_CRON_PATH, so
     cron's PATH points at the real location rather than a hardcoded guess.
     """
     dirs = []
-    for agent in agents:
-        location = shutil.which(agent)
+    for command in commands:
+        location = shutil.which(command)
         if location is None:
-            sys.exit(f"error: '{agent}' not found on PATH; install it before scheduling")
+            sys.exit(f"error: '{command}' not found on PATH; install it before scheduling")
         dirs.append(str(Path(location).parent))
     return ":".join(dict.fromkeys(dirs + BASE_CRON_PATH.split(":")))
 
 
-def render_cron(system_times, tz, agent, cron_path):
+def render_cron(system_times, tz, command, backend, cron_path):
     """Render the managed crontab block for the given run times.
 
     The times are emitted in the daemon's own timezone (see to_system_times); we
@@ -162,13 +223,16 @@ def render_cron(system_times, tz, agent, cron_path):
         system_times: Run times as fractional hours in system-local time
             (see to_system_times and hour_minute).
         tz: IANA timezone the schedule was requested in, recorded as a comment.
-        agent: Agent CLI to run, passed to the yo command as its argument.
+        command: Command `yo` invokes, also the marker/log key (see command_name).
+        backend: Runner backend for `command`; emitted as `--backend` unless
+            `command` is itself a backend (then `yo` infers it and the line
+            stays bare).
         cron_path: PATH value for the block (see cron_path_for).
 
     Returns:
         The crontab text, wrapped in the begin/end markers, ending in a newline.
     """
-    begin, end = markers(agent)
+    begin, end = markers(command)
     local_tz = datetime.now().astimezone().tzname()
     lines = [
         begin,
@@ -176,9 +240,10 @@ def render_cron(system_times, tz, agent, cron_path):
         f"PATH={cron_path}",
         "",
     ]
+    backend_arg = "" if command == backend else f" --backend {backend}"
     for t in system_times:
         hour, minute = hour_minute(t)
-        lines.append(f"{minute} {hour} * * * {JOB_CMD} {agent}")
+        lines.append(f"{minute} {hour} * * * {JOB_CMD} {command}{backend_arg}")
     lines.append(end)
     return "\n".join(lines) + "\n"
 
@@ -204,8 +269,9 @@ def main(args):
         )
         end += 24  # working hours wrap past midnight (e.g. night shift 22-6)
 
-    agents = list(dict.fromkeys(args.agent))  # de-dupe, preserve order
-    cron_path = cron_path_for(agents)  # resolves agents; errors if one is missing
+    command = args.command
+    backend = resolve_backend(command, args.backend)
+    cron_path = cron_path_for([command])  # resolves the command; errors if it's missing
 
     # The windowed schedule should cover the working day; warn if it can't.
     coverage = args.num_windows * args.window_hours
@@ -219,12 +285,12 @@ def main(args):
 
     run_times = compute_run_times(start, end, args.num_windows, args.window_hours)
     system_times = to_system_times(run_times, args.tz)
-    cron_content = "".join(render_cron(system_times, args.tz, a, cron_path) for a in agents)
+    cron_content = render_cron(system_times, args.tz, command, backend, cron_path)
 
     requested = ", ".join(f"{h:02d}:{m:02d}" for h, m in map(hour_minute, run_times))
     scheduled = ", ".join(f"{h:02d}:{m:02d}" for h, m in map(hour_minute, system_times))
     local_tz = datetime.now().astimezone().tzname()
-    print(f"Scheduled pings ({', '.join(agents)}): {requested} {args.tz} "
+    print(f"Scheduled pings ({command}): {requested} {args.tz} "
           f"-> {scheduled} {local_tz} (cron schedules in system time)")
 
     print(f"\nGenerated cron snippet:\n\n{cron_content}")
@@ -241,16 +307,14 @@ def main(args):
     if existing.returncode != 0 and "no crontab for" not in existing.stderr.lower():
         sys.exit(f"error: 'crontab -l' failed: {existing.stderr.strip() or existing.returncode}")
 
-    # Drop only the blocks for the agents we're installing, so re-running
-    # replaces them while leaving other agents' blocks (and the user's own
-    # lines) untouched.
-    begins = {markers(a)[0] for a in agents}
-    ends = {markers(a)[1] for a in agents}
+    # Drop only this command's block, so re-running replaces it while leaving
+    # other commands' blocks (and the user's own lines) untouched.
+    begin, end = markers(command)
     kept, skipping = [], False
     for line in existing.stdout.splitlines():
-        if line in begins:
+        if line == begin:
             skipping = True
-        elif line in ends:
+        elif line == end:
             skipping = False
         elif not skipping:
             kept.append(line)

@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
 """Unit tests for install helpers."""
+import argparse
+import io
 import os
 import time
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 from unittest import mock
 
 import install
-from install import BASE_CRON_PATH, cron_path_for, hour_minute, to_system_times
+from install import (
+    BASE_CRON_PATH,
+    command_name,
+    cron_path_for,
+    hour_minute,
+    render_cron,
+    resolve_backend,
+    to_system_times,
+)
 
 
 @contextmanager
@@ -91,6 +101,73 @@ class CronPathForTest(unittest.TestCase):
         with mock.patch("install.shutil.which", self._which({})):
             with self.assertRaises(SystemExit):
                 cron_path_for(["claude"])
+
+
+class CommandNameTest(unittest.TestCase):
+    def test_accepts_backend_and_custom_names(self):
+        for name in ("codex", "claude", "work-ai", "perso", "codex-pro", "a.b_c"):
+            self.assertEqual(command_name(name), name)
+
+    def test_empty_name_rejected(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            command_name("")
+
+    def test_unsafe_names_rejected(self):
+        # Names that would split or be interpreted by cron's shell, or read as a
+        # flag/dotfile, are refused before they reach the crontab.
+        for bad in ("my agent", "a;rm -rf", "a|b", "$(id)", "a/b", "-flag", ".hidden"):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                command_name(bad)
+
+
+class ResolveBackendTest(unittest.TestCase):
+    def test_bare_backend_infers_itself(self):
+        self.assertEqual(resolve_backend("codex", None), "codex")
+        self.assertEqual(resolve_backend("claude", None), "claude")
+
+    def test_custom_command_takes_backend(self):
+        self.assertEqual(resolve_backend("work-ai", "codex"), "codex")
+
+    def test_bare_backend_with_matching_flag_ok(self):
+        self.assertEqual(resolve_backend("codex", "codex"), "codex")
+
+    def test_bare_backend_with_conflicting_flag_exits(self):
+        with self.assertRaises(SystemExit):
+            resolve_backend("codex", "claude")
+
+    def test_custom_command_without_backend_exits(self):
+        with self.assertRaises(SystemExit):
+            resolve_backend("work-ai", None)
+
+
+class ParseArgsTest(unittest.TestCase):
+    def _parse(self, *args):
+        return install.parse_args(["--tz", "Europe/Paris", "--hours", "9-18", *args])
+
+    def test_command_flag_parsed(self):
+        args = self._parse("--command", "codex-pro", "--backend", "codex")
+        self.assertEqual(args.command, "codex-pro")
+        self.assertEqual(args.backend, "codex")
+
+    def test_command_required(self):
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                self._parse()
+
+
+class RenderCronTest(unittest.TestCase):
+    def test_backend_name_line_stays_bare(self):
+        # A canonical command lets yo infer the backend; no --backend emitted.
+        block = render_cron([6], "Europe/Paris", "codex", "codex", "/bin")
+        self.assertIn(f"{install.JOB_CMD} codex\n", block)
+        self.assertNotIn("--backend", block)
+        self.assertIn("# >>> yo-codex >>>", block)
+
+    def test_custom_command_emits_backend(self):
+        # A custom command name carries its backend into the cron line.
+        block = render_cron([6], "Europe/Paris", "work-ai", "codex", "/bin")
+        self.assertIn(f"{install.JOB_CMD} work-ai --backend codex\n", block)
+        self.assertIn("# >>> yo-work-ai >>>", block)
 
 
 class ToSystemTimesTest(unittest.TestCase):

@@ -18,19 +18,20 @@ cd yo
 ./yo claude                 # smoke-test: one ping now, reply in logs/
 
 # install a daily schedule anchored to your working hours
-./install.py --tz Europe/Paris --hours 9-18 --agent claude
+./install.py --tz Europe/Paris --hours 9-18 --command claude
 ```
 
 That's it — `cron` now pings on schedule. Re-run `install.py` any time to change
-the hours or agents. See [Usage](#usage) for more.
+the hours or commands. See [Usage](#usage) for more.
 
 ## Components
 
 - **`yo`** — the runner. Invokes the selected agent CLI once with the prompt
   `yo`, in a read-only/non-interactive mode, and writes the output to a
-  per-agent log. The agent is a required first argument (`codex` or `claude`);
-  an optional `--model` flag overrides the per-agent default (GPT-5.6-terra for
-  Codex, Haiku for Claude).
+  per-command log. The command is a required first argument: a backend name
+  (`codex` or `claude`) or any [custom command](#custom-commands) paired with
+  `--backend`. An optional `--model` flag overrides the per-backend default
+  (GPT-5.6-terra for Codex, Haiku for Claude).
 - **`install.py`** — generates and installs the crontab. Given a timezone and
   working hours, it builds a schedule that re-anchors each agent's 5h usage
   window across your day (see [Window model](#window-model)) and pipes the
@@ -49,19 +50,55 @@ Run once, ad hoc:
 ./yo claude --model opus      # Claude with an explicit model
 ```
 
-Install a schedule (review the snippet, confirm, and it's added to your crontab):
+Install a schedule (review the snippet, confirm, and it's added to your crontab).
+One command per run — for several, run it once each:
 
 ```sh
-./install.py --tz Europe/Paris --hours 9-18 --agent codex
-./install.py --tz Europe/Paris --hours 9-18 --agent claude
-./install.py --tz Europe/Paris --hours 9-18 --agent codex claude    # both
+./install.py --tz Europe/Paris --hours 9-18 --command codex
+./install.py --tz Europe/Paris --hours 9-18 --command claude
 ```
 
-Each agent gets their own marked block in the crontab, so installing one agent
-leaves the others (and your own crontab lines) untouched. Re-running an agent
-replaces only their block.
+Each command gets its own marked block in the crontab, so installing one leaves
+the others (and your own crontab lines) untouched. Re-running a command replaces
+only its block.
 
 See `./install.py --help` for `--window-hours`, `--num-windows`, and `--yes`.
+
+### Custom commands
+
+Say you drive several logins behind their own wrappers — each a small executable
+script on `PATH` (not a shell alias: cron and `install.py`'s `PATH` lookup only
+see real files) that points its CLI at one account's auth/config. Bare
+`codex`/`claude` only reach your default logins, so run each wrapper by name and
+name the backend instead. The name is just a label `yo` doesn't parse;
+`--backend` (`codex` or `claude`) picks the runner:
+
+```sh
+./yo codex-pro     --backend codex     # professional Codex login
+./yo codex-perso   --backend codex     # personal Codex login — same backend, other auth
+./yo claude-perso  --backend claude    # personal Claude login
+```
+
+The first two share the Codex backend and differ only by name — which is exactly
+why the backend is a separate flag and not read off the command: the name says
+*which login*, the backend says *which runner*, and the two are independent.
+
+`install.py` mirrors that shape — one command plus `--backend`, run once per
+command (each lands in its own block, so they coexist). Bare `codex`/`claude`
+still infer themselves:
+
+```sh
+./install.py ... --command codex-pro     --backend codex
+./install.py ... --command codex-perso   --backend codex
+./install.py ... --command claude-perso  --backend claude
+```
+
+A custom name with no `--backend` is rejected, since the runner is unknown.
+
+`install.py` keys the log and crontab marker on the command name
+(`yo-codex-pro`), and bakes the resolved `--backend` into the generated cron
+line. Every command must resolve on `PATH` — `install.py` prepends the directory
+it's found in to the block's cron `PATH`, same as for a backend name.
 
 ## Window model
 
@@ -123,8 +160,8 @@ another timezone), **re-run `install.py`** to re-anchor the schedule.
 
 ## Logs
 
-Written under `logs/` as `yo-<agent>-<timestamp>.log`, with the final message in
-`yo-<agent>.last.txt`.
+Written under `logs/` as `yo-<command>-<timestamp>.log`, with the final message
+in `yo-<command>.last.txt`.
 
 ## Anchor test utilities
 
