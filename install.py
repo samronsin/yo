@@ -76,26 +76,26 @@ def agent_name(value):
     return value
 
 
-def resolve_backend(name, backend):
-    """Decide the runner backend for the command `name`.
+def resolve_backend(command, backend):
+    """Decide the runner backend for `command`.
 
     A bare backend name ("codex"/"claude") is its own backend; if --backend is
     also given it must agree. Any other command requires --backend, since we
     can't tell which runner flags to apply otherwise.
 
     Args:
-        name: The command to run (see agent_name).
+        command: The command to run (see agent_name).
         backend: The --backend value (a backend name), or None.
 
     Returns:
         The resolved backend name; exits with an error if it can't be decided.
     """
-    if name in BACKENDS:
-        if backend is not None and backend != name:
-            sys.exit(f"error: '{name}' is itself a backend; drop --backend or pass --backend {name}")
-        return name
+    if command in BACKENDS:
+        if backend is not None and backend != command:
+            sys.exit(f"error: '{command}' is itself a backend; drop --backend or pass --backend {command}")
+        return command
     if backend is None:
-        sys.exit(f"error: '{name}' is a custom command; pass --backend codex|claude")
+        sys.exit(f"error: '{command}' is a custom command; pass --backend codex|claude")
     return backend
 
 
@@ -208,7 +208,7 @@ def cron_path_for(agents):
     return ":".join(dict.fromkeys(dirs + BASE_CRON_PATH.split(":")))
 
 
-def render_cron(system_times, tz, name, backend, cron_path):
+def render_cron(system_times, tz, command, backend, cron_path):
     """Render the managed crontab block for the given run times.
 
     The times are emitted in the daemon's own timezone (see to_system_times); we
@@ -220,15 +220,16 @@ def render_cron(system_times, tz, name, backend, cron_path):
         system_times: Run times as fractional hours in system-local time
             (see to_system_times and hour_minute).
         tz: IANA timezone the schedule was requested in, recorded as a comment.
-        name: Command `yo` invokes, also the marker/log key (see agent_name).
-        backend: Runner backend for `name`; emitted as `--backend` unless `name`
-            is itself a backend (then `yo` infers it and the line stays bare).
+        command: Command `yo` invokes, also the marker/log key (see agent_name).
+        backend: Runner backend for `command`; emitted as `--backend` unless
+            `command` is itself a backend (then `yo` infers it and the line
+            stays bare).
         cron_path: PATH value for the block (see cron_path_for).
 
     Returns:
         The crontab text, wrapped in the begin/end markers, ending in a newline.
     """
-    begin, end = markers(name)
+    begin, end = markers(command)
     local_tz = datetime.now().astimezone().tzname()
     lines = [
         begin,
@@ -236,10 +237,10 @@ def render_cron(system_times, tz, name, backend, cron_path):
         f"PATH={cron_path}",
         "",
     ]
-    backend_arg = "" if name == backend else f" --backend {backend}"
+    backend_arg = "" if command == backend else f" --backend {backend}"
     for t in system_times:
         hour, minute = hour_minute(t)
-        lines.append(f"{minute} {hour} * * * {JOB_CMD} {name}{backend_arg}")
+        lines.append(f"{minute} {hour} * * * {JOB_CMD} {command}{backend_arg}")
     lines.append(end)
     return "\n".join(lines) + "\n"
 
@@ -265,9 +266,9 @@ def main(args):
         )
         end += 24  # working hours wrap past midnight (e.g. night shift 22-6)
 
-    name = args.agent
-    backend = resolve_backend(name, args.backend)
-    cron_path = cron_path_for([name])  # resolves the command; errors if it's missing
+    command = args.agent
+    backend = resolve_backend(command, args.backend)
+    cron_path = cron_path_for([command])  # resolves the command; errors if it's missing
 
     # The windowed schedule should cover the working day; warn if it can't.
     coverage = args.num_windows * args.window_hours
@@ -281,12 +282,12 @@ def main(args):
 
     run_times = compute_run_times(start, end, args.num_windows, args.window_hours)
     system_times = to_system_times(run_times, args.tz)
-    cron_content = render_cron(system_times, args.tz, name, backend, cron_path)
+    cron_content = render_cron(system_times, args.tz, command, backend, cron_path)
 
     requested = ", ".join(f"{h:02d}:{m:02d}" for h, m in map(hour_minute, run_times))
     scheduled = ", ".join(f"{h:02d}:{m:02d}" for h, m in map(hour_minute, system_times))
     local_tz = datetime.now().astimezone().tzname()
-    print(f"Scheduled pings ({name}): {requested} {args.tz} "
+    print(f"Scheduled pings ({command}): {requested} {args.tz} "
           f"-> {scheduled} {local_tz} (cron schedules in system time)")
 
     print(f"\nGenerated cron snippet:\n\n{cron_content}")
@@ -305,7 +306,7 @@ def main(args):
 
     # Drop only this command's block, so re-running replaces it while leaving
     # other commands' blocks (and the user's own lines) untouched.
-    begin, end = markers(name)
+    begin, end = markers(command)
     kept, skipping = [], False
     for line in existing.stdout.splitlines():
         if line == begin:
