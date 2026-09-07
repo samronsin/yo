@@ -10,7 +10,7 @@ from unittest import mock
 import install
 from install import (
     BASE_CRON_PATH,
-    agent_name,
+    command_name,
     cron_path_for,
     hour_minute,
     render_cron,
@@ -102,21 +102,21 @@ class CronPathForTest(unittest.TestCase):
                 cron_path_for(["claude"])
 
 
-class AgentNameTest(unittest.TestCase):
+class CommandNameTest(unittest.TestCase):
     def test_accepts_backend_and_custom_names(self):
         for name in ("codex", "claude", "work-ai", "perso", "codex-pro", "a.b_c"):
-            self.assertEqual(agent_name(name), name)
+            self.assertEqual(command_name(name), name)
 
     def test_empty_name_rejected(self):
         with self.assertRaises(argparse.ArgumentTypeError):
-            agent_name("")
+            command_name("")
 
     def test_unsafe_names_rejected(self):
         # Names that would split or be interpreted by cron's shell, or read as a
         # flag/dotfile, are refused before they reach the crontab.
         for bad in ("my agent", "a;rm -rf", "a|b", "$(id)", "a/b", "-flag", ".hidden"):
             with self.assertRaises(argparse.ArgumentTypeError):
-                agent_name(bad)
+                command_name(bad)
 
 
 class ResolveBackendTest(unittest.TestCase):

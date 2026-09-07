@@ -55,20 +55,23 @@ BACKENDS = ("codex", "claude")
 # the block markers, and the log filename, so restrict it to a conservative
 # shell- and path-safe set -- an executable resolvable on PATH never needs more.
 # Must start alphanumeric so it can't be read as a flag or a dotfile.
-AGENT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+COMMAND_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
-def agent_name(value):
-    """argparse type: validate a command name's charset (see AGENT_NAME_RE).
+def command_name(value):
+    """argparse `type=` converter for --agent: validate the command's charset.
 
-    The name is the command `yo` invokes and the crontab marker / log key. It's
-    restricted so it stays safe unquoted in the crontab line it's written to;
-    the runner backend is a separate --backend (see resolve_backend), mirroring
+    An argparse `type=` callable receives the raw string and its return value
+    becomes the parsed argument (here args.agent), so this validates and returns
+    `value` unchanged -- no conversion, but the return is what argparse stores.
+    The command is what `yo` invokes and the crontab marker / log key; it's
+    restricted so it stays safe unquoted in the crontab line it's written to.
+    The runner backend is a separate --backend (see resolve_backend), mirroring
     `yo <command> --backend ...`.
     """
-    if not value:
+    if value == "":
         raise argparse.ArgumentTypeError("empty command name")
-    if not AGENT_NAME_RE.fullmatch(value):
+    if not COMMAND_NAME_RE.fullmatch(value):
         raise argparse.ArgumentTypeError(
             f"command name '{value}' must start with a letter or digit and use "
             f"only letters, digits, '.', '_', '-' (it's written unquoted into "
@@ -84,7 +87,7 @@ def resolve_backend(command, backend):
     can't tell which runner flags to apply otherwise.
 
     Args:
-        command: The command to run (see agent_name).
+        command: The command to run (see command_name).
         backend: The --backend value (a backend name), or None.
 
     Returns:
@@ -107,7 +110,7 @@ def parse_args():
                         metavar=str(DEFAULT_WINDOW_HOURS), help="Hours each run covers")
     parser.add_argument("--num-windows", type=positive_int, default=DEFAULT_NUM_WINDOWS,
                         metavar=str(DEFAULT_NUM_WINDOWS), help="Number of runs per day")
-    parser.add_argument("--agent", required=True, type=agent_name, metavar="NAME",
+    parser.add_argument("--agent", required=True, type=command_name, metavar="NAME",
                         help="Command to run: a backend (codex/claude), or a "
                              "custom command whose runner is given by --backend "
                              "(e.g. codex-pro). Run once per command; each gets "
@@ -220,7 +223,7 @@ def render_cron(system_times, tz, command, backend, cron_path):
         system_times: Run times as fractional hours in system-local time
             (see to_system_times and hour_minute).
         tz: IANA timezone the schedule was requested in, recorded as a comment.
-        command: Command `yo` invokes, also the marker/log key (see agent_name).
+        command: Command `yo` invokes, also the marker/log key (see command_name).
         backend: Runner backend for `command`; emitted as `--backend` unless
             `command` is itself a backend (then `yo` infers it and the line
             stays bare).
