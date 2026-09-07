@@ -62,6 +62,16 @@ Each command gets its own marked block in the crontab, so installing one leaves
 the others (and your own crontab lines) untouched. Re-running a command replaces
 only its block.
 
+To see what's installed, with each command's run times and log location:
+
+```sh
+./install.py --status
+```
+
+Blocks for commands you've renamed or stopped using stay in the crontab (and
+keep firing) until you delete them by hand with `crontab -e`; `--status` lists
+them too.
+
 See `./install.py --help` for `--window-hours`, `--num-windows`, and `--yes`.
 
 ### Custom commands
