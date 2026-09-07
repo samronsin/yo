@@ -22,7 +22,8 @@ cd yo
 ```
 
 That's it — `cron` now pings on schedule. Re-run `install.py` any time to change
-the hours or commands. See [Usage](#usage) for more.
+the hours or commands, or `./install.py --remove claude` to stop. See
+[Usage](#usage) for more.
 
 ## Components
 
@@ -68,9 +69,15 @@ To see what's installed, with each command's run times and log location:
 ./install.py --status
 ```
 
-Blocks for commands you've renamed or stopped using stay in the crontab (and
-keep firing) until you delete them by hand with `crontab -e`; `--status` lists
-them too.
+To stop a command, remove its block (review it, confirm, and it's gone). Only
+that block goes; other commands' blocks and your own crontab lines stay:
+
+```sh
+./install.py --remove codex
+```
+
+A block installed under a name you've since renamed keeps firing until it's
+removed; `--status` lists it, so `--remove` it by its old name.
 
 See `./install.py --help` for `--window-hours`, `--num-windows`, and `--yes`.
 
