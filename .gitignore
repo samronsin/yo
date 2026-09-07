@@ -4,3 +4,9 @@ logs/
 # Python bytecode
 __pycache__/
 *.py[cod]
+
+# Parallel git worktrees (see `git worktree list`)
+.worktrees/
+
+# macOS Finder metadata (any directory)
+.DS_Store
