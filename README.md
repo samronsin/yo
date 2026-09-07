@@ -66,8 +66,9 @@ See `./install.py --help` for `--window-hours`, `--num-windows`, and `--yes`.
 
 ### Custom commands
 
-Say you drive several logins behind their own wrappers — each a small script (or
-shell alias) on `PATH` that points its CLI at one account's auth/config. Bare
+Say you drive several logins behind their own wrappers — each a small executable
+script on `PATH` (not a shell alias: cron and `install.py`'s `PATH` lookup only
+see real files) that points its CLI at one account's auth/config. Bare
 `codex`/`claude` only reach your default logins, so run each wrapper by name and
 name the backend instead. The name is just a label `yo` doesn't parse;
 `--backend` (`codex` or `claude`) picks the runner:

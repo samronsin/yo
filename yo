@@ -34,14 +34,22 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Infer the backend when the command is itself a backend name; otherwise it must
-# be given explicitly so we know which runner flags to apply.
-if [[ -z "$BACKEND" ]]; then
-  case "$COMMAND" in
-    codex|claude) BACKEND="$COMMAND" ;;
-    *) echo "error: --backend (codex|claude) is required for command '$COMMAND'" >&2; exit 2 ;;
-  esac
-fi
+# Resolve the backend (mirrors install.py's resolve_backend): a command that is
+# itself a backend name is its own backend, and an explicit --backend must
+# agree with it -- a conflicting one is a usage error, not a silent run through
+# the wrong runner. Any other command needs --backend, since we can't tell which
+# runner flags to apply otherwise.
+case "$COMMAND" in
+  codex|claude)
+    if [[ -n "$BACKEND" && "$BACKEND" != "$COMMAND" ]]; then
+      echo "error: '$COMMAND' is itself a backend; drop --backend or pass --backend $COMMAND" >&2; exit 2
+    fi
+    BACKEND="$COMMAND"
+    ;;
+  *)
+    [[ -n "$BACKEND" ]] || { echo "error: --backend (codex|claude) is required for command '$COMMAND'" >&2; exit 2; }
+    ;;
+esac
 case "$BACKEND" in
   codex|claude) ;;
   *) echo "error: --backend must be 'codex' or 'claude', got '$BACKEND'" >&2; exit 2 ;;
