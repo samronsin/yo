@@ -80,7 +80,8 @@ Say you drive several logins behind their own wrappers — each a small executab
 script on `PATH` (not a shell alias: cron and `install.py`'s `PATH` lookup only
 see real files) that points its CLI at one account's auth/config. Bare
 `codex`/`claude` only reach your default logins, so run each wrapper by name and
-name the backend instead. The name is just a label `yo` doesn't parse;
+name the backend instead. The name is the executable `yo` invokes and a label
+`yo` otherwise doesn't parse;
 `--backend` (`codex` or `claude`) picks the runner:
 
 ```sh

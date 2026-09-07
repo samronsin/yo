@@ -105,8 +105,10 @@ class CronPathForTest(unittest.TestCase):
 
     def test_missing_agent_exits(self):
         with mock.patch("install.shutil.which", self._which({})):
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(SystemExit) as cm:
                 cron_path_for(["claude"])
+        self.assertIn("executable on PATH", str(cm.exception))
+        self.assertIn("not shell aliases", str(cm.exception))
 
 
 class CommandNameTest(unittest.TestCase):

@@ -114,9 +114,11 @@ def parse_args(argv=None):
                         metavar=str(DEFAULT_NUM_WINDOWS), help="Number of runs per day")
     parser.add_argument("--command", type=command_name, metavar="NAME",
                         help="Command to run (required to install): a backend "
-                             "(codex/claude), or a custom command whose runner is "
-                             "given by --backend (e.g. codex-pro). Run once per "
-                             "command; each gets its own crontab block.")
+                             "(codex/claude), or a custom executable "
+                             "script/binary on PATH whose runner is given by "
+                             "--backend (e.g. codex-pro). Shell aliases are not "
+                             "supported by cron. Run once per command; each gets "
+                             "its own crontab block.")
     parser.add_argument("--backend", choices=BACKENDS,
                         help="Runner backend for a custom --command; a backend "
                              "name (codex/claude) is its own backend")
@@ -207,15 +209,20 @@ def to_system_times(run_times, tz):
 def cron_path_for(commands):
     """Build the cron PATH so the jobs find each command where it lives.
 
-    Resolves each command in the installer's environment (erroring if one is
-    missing) and prepends the directory it was found in to BASE_CRON_PATH, so
-    cron's PATH points at the real location rather than a hardcoded guess.
+    Resolves each command in the installer's environment with shutil.which
+    (erroring if one is missing) and prepends the directory it was found in to
+    BASE_CRON_PATH, so cron's PATH points at the real location rather than a
+    hardcoded guess. Shell aliases are intentionally rejected: cron will not load
+    an interactive shell's alias definitions.
     """
     dirs = []
     for command in commands:
         location = shutil.which(command)
         if location is None:
-            sys.exit(f"error: '{command}' not found on PATH; install it before scheduling")
+            sys.exit(
+                f"error: '{command}' not found as an executable on PATH; "
+                "scheduled commands must be wrapper scripts or binaries, not shell aliases"
+            )
         dirs.append(str(Path(location).parent))
     return ":".join(dict.fromkeys(dirs + BASE_CRON_PATH.split(":")))
 
