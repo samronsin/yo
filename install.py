@@ -104,8 +104,12 @@ def resolve_backend(command, backend):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Install yo cron jobs")
-    parser.add_argument("--status", action="store_true",
-                        help="Show the installed yo cron jobs and exit")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--status", action="store_true",
+                      help="Show the installed yo cron jobs and exit")
+    mode.add_argument("--remove", type=command_name, metavar="NAME",
+                      help="Remove NAME's cron block (see --status) and exit; "
+                           "other blocks and your own crontab lines are kept")
     parser.add_argument("--tz", help="Timezone, e.g. Europe/Paris (required to install)")
     parser.add_argument("--hours", help="Working hours as START-END (24h), e.g. 9-18 (required to install)")
     parser.add_argument("--window-hours", type=positive_int, default=DEFAULT_WINDOW_HOURS,
@@ -124,12 +128,20 @@ def parse_args(argv=None):
                              "name (codex/claude) is its own backend")
     parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     args = parser.parse_args(argv)
-    # --status is a read-only query mode; the schedule flags are only required to
-    # install. (If a third mode ever lands, switch to subcommands instead.)
+    # --status and --remove act on the installed crontab without computing a
+    # schedule, so the schedule flags are required (and only meaningful) to
+    # install. Three flag-selected modes is the ceiling before subcommands.
     required = (("--tz", args.tz), ("--hours", args.hours), ("--command", args.command))
-    missing = [flag for flag, value in required if value is None]
-    if missing and not args.status:
-        parser.error(f"the following arguments are required: {', '.join(missing)}")
+    mode_flag = "--status" if args.status else "--remove" if args.remove else None
+    if mode_flag is None:
+        missing = [flag for flag, value in required if value is None]
+        if missing:
+            parser.error(f"the following arguments are required: {', '.join(missing)}")
+    else:
+        given = [flag for flag, value in (*required, ("--backend", args.backend))
+                 if value is not None]
+        if given:
+            parser.error(f"{mode_flag} cannot be combined with {', '.join(given)}")
     return args
 
 
@@ -274,6 +286,21 @@ def read_crontab():
     return existing.stdout
 
 
+def write_crontab(lines):
+    """Replace the user's crontab with `lines` (an empty list installs an empty crontab)."""
+    text = "\n".join(lines) + ("\n" if lines else "")
+    subprocess.run(["crontab", "-"], input=text, text=True, check=True)
+
+
+def confirm(question):
+    """Ask a y/N question on stdin; a non-interactive stdin counts as a decline."""
+    try:
+        reply = input(question)
+    except EOFError:
+        reply = ""
+    return reply.strip().lower() in ("y", "yes")
+
+
 # Matches either marker line written by markers(); group 1 tells begin (>>>)
 # from end (<<<), group 2 is the command.
 MARKER_RE = re.compile(rf"# (>>>|<<<) yo-({COMMAND_NAME_RE.pattern}) \1")
@@ -373,6 +400,8 @@ def main(args):
     try:
         if args.status:
             print(format_status(installed_jobs(read_crontab())), end="")
+        elif args.remove:
+            remove_schedule(args)
         else:
             install_schedule(args)
     except MalformedCrontab as exc:
@@ -427,21 +456,37 @@ def install_schedule(args):
 
     print(f"\nGenerated cron snippet:\n\n{cron_content}")
 
-    if not args.yes:
-        try:
-            reply = input("\nInstall this into your crontab? [y/N] ")
-        except EOFError:
-            reply = ""  # non-interactive stdin: treat as a decline
-        if reply.strip().lower() not in ("y", "yes"):
-            sys.exit("Aborted; nothing changed.")
+    if not args.yes and not confirm("\nInstall this into your crontab? [y/N] "):
+        sys.exit("Aborted; nothing changed.")
 
     # Drop only this command's block, so re-running replaces it while leaving
     # other commands' blocks (and the user's own lines) untouched. Re-read now:
     # the crontab may have changed while the user was reviewing the prompt.
     kept = remove_managed_block(read_crontab(), command)
-    merged = "\n".join(kept) + ("\n" if kept else "") + cron_content
-    subprocess.run(["crontab", "-"], input=merged, text=True, check=True)
+    write_crontab(kept + cron_content.splitlines())
     print("Crontab updated.")
+
+
+def remove_schedule(args):
+    """Drop `args.remove`'s managed block from the crontab, leaving the rest as is."""
+    command = args.remove
+    # Splitting also refuses a malformed crontab before anything is shown or asked.
+    segments = split_managed_blocks(read_crontab())
+    block = [line for owner, lines in segments if owner == command for line in lines]
+    if not block:
+        installed = [owner for owner, _ in segments if owner is not None]
+        hint = (f"installed: {', '.join(installed)} (see --status)" if installed
+                else "no yo cron jobs installed")
+        sys.exit(f"error: no yo-{command} block in the crontab; {hint}")
+
+    print(f"Cron block to remove ({command}):\n\n" + "\n".join(block) + "\n")
+
+    if not args.yes and not confirm("\nRemove this from your crontab? [y/N] "):
+        sys.exit("Aborted; nothing changed.")
+
+    # Re-read: the crontab may have changed while the user was reviewing the prompt.
+    write_crontab(remove_managed_block(read_crontab(), command))
+    print(f"Crontab updated; yo-{command} block removed.")
 
 
 if __name__ == "__main__":

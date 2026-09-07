@@ -165,17 +165,42 @@ class ParseArgsTest(unittest.TestCase):
         self.assertTrue(args.status)
         self.assertIsNone(args.command)
 
+    def test_remove_does_not_require_install_args(self):
+        args = self._parse("--remove", "codex-pro")
+        self.assertEqual(args.remove, "codex-pro")
+        self.assertFalse(args.status)
+        self.assertIsNone(args.command)
+
+    def _usage_error(self, *argv):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as cm:
+                self._parse(*argv)
+        self.assertEqual(cm.exception.code, 2)
+        return stderr.getvalue()
+
     def test_install_args_required(self):
         # All missing flags are reported at once, and only the missing ones.
         for argv, expected in (((), "--tz, --hours, --command"),
                                (("--tz", "Europe/Paris", "--hours", "9-18"), "--command")):
             with self.subTest(argv=argv):
-                stderr = io.StringIO()
-                with redirect_stderr(stderr):
-                    with self.assertRaises(SystemExit) as cm:
-                        self._parse(*argv)
-                self.assertEqual(cm.exception.code, 2)
-                self.assertIn(f"required: {expected}\n", stderr.getvalue())
+                self.assertIn(f"required: {expected}\n", self._usage_error(*argv))
+
+    def test_remove_name_validated_like_command(self):
+        # The name is matched against the crontab markers, so it's held to the
+        # same charset as --command (a stray shell-ish name can't match anyway).
+        self.assertIn("must start with a letter or digit", self._usage_error("--remove", "a;b"))
+
+    def test_modes_are_exclusive(self):
+        self.assertIn("not allowed with", self._usage_error("--status", "--remove", "codex"))
+
+    def test_modes_reject_schedule_args(self):
+        # Mixing a schedule with --status/--remove is almost certainly a mistake
+        # (e.g. thinking --remove edits an install), so refuse rather than ignore.
+        self.assertIn("--remove cannot be combined with --command, --backend\n",
+                      self._usage_error("--remove", "codex", "--command", "codex", "--backend", "codex"))
+        self.assertIn("--status cannot be combined with --tz\n",
+                      self._usage_error("--status", "--tz", "Europe/Paris"))
 
 
 class ManagedBlocksTest(unittest.TestCase):
@@ -297,6 +322,78 @@ class StatusTest(unittest.TestCase):
         self.assertTrue(merged.startswith(after))
         self.assertNotIn("before", merged)
         self.assertIn("# >>> yo-codex >>>", merged)
+
+
+class RemoveTest(unittest.TestCase):
+    CRONTAB = ManagedBlocksTest.CRONTAB
+
+    def _remove(self, command, crontab, *flags, reply="y"):
+        """Run `--remove command` against `crontab`; returns (stdout, crontab written or None)."""
+        args = install.parse_args(["--remove", command, *flags])
+        reads = crontab if isinstance(crontab, list) else [crontab, crontab]
+        out = io.StringIO()
+        with mock.patch("install.read_crontab", side_effect=reads):
+            with mock.patch("builtins.input", return_value=reply) as self.input_mock:
+                with mock.patch("install.subprocess.run") as run_mock:
+                    with redirect_stdout(out):
+                        install.main(args)
+        written = run_mock.call_args.kwargs["input"] if run_mock.called else None
+        return out.getvalue(), written
+
+    def test_removes_only_the_selected_block(self):
+        out, written = self._remove("codex", self.CRONTAB)
+        # The block is shown for review before the prompt...
+        self.assertIn("Cron block to remove (codex):\n\n# >>> yo-codex >>>\n", out)
+        self.assertIn(f"2 11 * * * {install.JOB_CMD} codex\n# <<< yo-codex <<<\n", out)
+        self.assertIn("Crontab updated; yo-codex block removed.\n", out)
+        # ...and only it is dropped: the user's lines and the other block survive.
+        self.assertNotIn("yo-codex >>>", written)
+        self.assertNotIn(f"{install.JOB_CMD} codex\n", written)
+        self.assertEqual(written.count("yo-codex-pro"), 2)
+        self.assertIn("MAILTO=me@example.com\n", written)
+        self.assertIn("15 9 * * * echo unmanaged\n", written)
+        self.assertTrue(written.endswith("# <<< yo-codex-pro <<<\n"))
+
+    def test_removing_last_block_leaves_empty_crontab(self):
+        crontab = render_cron([6], "Europe/Paris", "codex", "codex", "/bin")
+        _, written = self._remove("codex", crontab)
+        self.assertEqual(written, "")
+
+    def test_yes_skips_prompt(self):
+        _, written = self._remove("codex-pro", self.CRONTAB, "--yes")
+        self.input_mock.assert_not_called()
+        self.assertIsNotNone(written)
+
+    def test_decline_changes_nothing(self):
+        with self.assertRaises(SystemExit) as cm:
+            self._remove("codex", self.CRONTAB, reply="n")
+        self.assertEqual(cm.exception.code, "Aborted; nothing changed.")
+
+    def test_missing_block_is_an_error_listing_installed(self):
+        # The stale-name case from a rename: point at what's actually there.
+        with self.assertRaises(SystemExit) as cm:
+            self._remove("claude", self.CRONTAB)
+        self.assertEqual(cm.exception.code,
+                         "error: no yo-claude block in the crontab; installed: codex, codex-pro (see --status)")
+        self.input_mock.assert_not_called()
+        with self.assertRaises(SystemExit) as cm:
+            self._remove("claude", "15 9 * * * echo mine\n")
+        self.assertIn("no yo cron jobs installed", cm.exception.code)
+
+    def test_malformed_crontab_refused_before_prompt(self):
+        # Same safeguard as install: never guess a broken block's extent.
+        with self.assertRaises(SystemExit) as cm:
+            self._remove("codex", "# >>> yo-codex >>>\n0 6 * * * /repo/yo codex\n")
+        self.assertIn("missing its end marker", cm.exception.code)
+        self.input_mock.assert_not_called()
+
+    def test_removes_from_crontab_as_of_confirmation(self):
+        # Like install, act on the crontab as it stands after the user confirms.
+        before = self.CRONTAB
+        after = "15 9 * * * echo added meanwhile\n" + self.CRONTAB
+        _, written = self._remove("codex", [before, after])
+        self.assertTrue(written.startswith("15 9 * * * echo added meanwhile\n"))
+        self.assertNotIn("yo-codex >>>", written)
 
 
 class RenderCronTest(unittest.TestCase):
