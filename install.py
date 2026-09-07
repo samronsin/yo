@@ -95,7 +95,7 @@ def resolve_backend(command, backend):
     """
     if command in BACKENDS:
         if backend is not None and backend != command:
-            sys.exit(f"error: '{command}' is itself a backend; drop --backend or pass --backend {command}")
+            sys.exit(f"error: command '{command}' runs the {command} backend, but --backend {backend} was given; drop --backend or pass --backend {command}")
         return command
     if backend is None:
         sys.exit(f"error: '{command}' is a custom command; pass --backend codex|claude")

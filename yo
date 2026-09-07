@@ -42,7 +42,7 @@ done
 case "$COMMAND" in
   codex|claude)
     if [[ -n "$BACKEND" && "$BACKEND" != "$COMMAND" ]]; then
-      echo "error: '$COMMAND' is itself a backend; drop --backend or pass --backend $COMMAND" >&2; exit 2
+      echo "error: command '$COMMAND' runs the $COMMAND backend, but --backend $BACKEND was given; drop --backend or pass --backend $COMMAND" >&2; exit 2
     fi
     BACKEND="$COMMAND"
     ;;
