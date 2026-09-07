@@ -280,6 +280,22 @@ class StatusTest(unittest.TestCase):
         self.assertIn("missing its end marker", str(cm.exception))
         input_mock.assert_not_called()
 
+    def test_install_merges_into_crontab_as_of_confirmation(self):
+        # The user may edit the crontab while reviewing the prompt; the merge
+        # must build on what's there after they confirm, not the preflight read.
+        args = install.parse_args(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex"])
+        before, after = "15 9 * * * echo before\n", "15 9 * * * echo after\n"
+        with mock.patch("install.shutil.which", return_value="/usr/bin/codex"):
+            with mock.patch("install.read_crontab", side_effect=[before, after]):
+                with mock.patch("builtins.input", return_value="y"):
+                    with mock.patch("install.subprocess.run") as run_mock:
+                        with redirect_stdout(io.StringIO()):
+                            install.main(args)
+        merged = run_mock.call_args.kwargs["input"]
+        self.assertTrue(merged.startswith(after))
+        self.assertNotIn("before", merged)
+        self.assertIn("# >>> yo-codex >>>", merged)
+
 
 class RenderCronTest(unittest.TestCase):
     def test_backend_name_line_stays_bare(self):

@@ -373,7 +373,7 @@ def main(args):
 
 
 def install_schedule(args):
-    crontab = read_crontab()  # also fails fast when crontab isn't available
+    crontab = read_crontab()  # fails fast when crontab isn't available
 
     try:
         ZoneInfo(args.tz)
@@ -395,10 +395,8 @@ def install_schedule(args):
     command = args.command
     backend = resolve_backend(command, args.backend)
     cron_path = cron_path_for([command])  # resolves the command; errors if it's missing
-    # Drop only this command's block, so re-running replaces it while leaving
-    # other commands' blocks (and the user's own lines) untouched. Done before
-    # the prompt so a malformed crontab fails before the user approves anything.
-    kept = remove_managed_block(crontab, command)
+    # Preflight: a malformed crontab should fail before the user approves anything.
+    remove_managed_block(crontab, command)
 
     # The windowed schedule should cover the working day; warn if it can't.
     coverage = args.num_windows * args.window_hours
@@ -430,6 +428,10 @@ def install_schedule(args):
         if reply.strip().lower() not in ("y", "yes"):
             sys.exit("Aborted; nothing changed.")
 
+    # Drop only this command's block, so re-running replaces it while leaving
+    # other commands' blocks (and the user's own lines) untouched. Re-read now:
+    # the crontab may have changed while the user was reviewing the prompt.
+    kept = remove_managed_block(read_crontab(), command)
     merged = "\n".join(kept) + ("\n" if kept else "") + cron_content
     subprocess.run(["crontab", "-"], input=merged, text=True, check=True)
     print("Crontab updated.")
