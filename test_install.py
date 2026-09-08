@@ -43,6 +43,12 @@ def system_tz(tz):
 
 
 class HourMinuteTest(unittest.TestCase):
+    def test_experiment_margin_is_five_minutes_and_ordinary_is_unchanged(self):
+        for experiment, expected in ((False, [(6, 0), (11, 2), (16, 4)]),
+                                     (True, [(6, 0), (11, 5), (16, 10)])):
+            times = install.compute_run_times(9, 18, 3, 5, experiment=experiment)
+            self.assertEqual([hour_minute(t) for t in times], expected)
+
     def test_whole_hour(self):
         self.assertEqual(hour_minute(6), (6, 0))
 
@@ -149,6 +155,20 @@ class ResolveBackendTest(unittest.TestCase):
 
 
 class ParseArgsTest(unittest.TestCase):
+    def test_experiment_is_opt_in_and_codex_only(self):
+        args = install.parse_args(["--tz", "UTC", "--hours", "9-18", "--command", "codex"])
+        self.assertFalse(args.experiment)
+        block = render_cron([6], "UTC", "codex", "codex", "/bin", experiment=True)
+        self.assertIn("codex --experiment\n", block)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            install.parse_args(["--status", "--experiment"])
+        for command in (["--command", "claude"], ["--command", "claude-perso", "--backend", "claude"]):
+            args = install.parse_args(["--tz", "UTC", "--hours", "9-18", "--experiment", *command])
+            with mock.patch.object(install, "read_crontab", return_value=""), \
+                    redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as ctx:
+                install.install_schedule(args)
+            self.assertIn("--experiment is only supported with the codex backend", str(ctx.exception))
+
     def _parse(self, *args):
         return install.parse_args([*args])
 
