@@ -68,6 +68,11 @@ if [[ "$NO_EXPERIMENT" == true && ( "$EXPERIMENT" == true || -n "$EXPERIMENT_VIE
   echo "error: --no-experiment conflicts with experiment options" >&2; exit 2
 fi
 if [[ "$EXPERIMENT" == true || -n "$EXPERIMENT_VIEW" ]]; then
+  # Only Codex exposes a quota reset to verify anchoring against; there is no
+  # Claude observer, so an unverifiable Claude "experiment" is refused outright.
+  if [[ "$BACKEND" != codex ]]; then
+    echo "error: experiments are only supported with the codex backend, not '$BACKEND'" >&2; exit 2
+  fi
   experiment_args=()
   [[ -n "$EXPERIMENT_VIEW" ]] && experiment_args=("$EXPERIMENT_VIEW")
   exec python3 "$ROOT_DIR/utils/experiments.py" "$COMMAND" --backend "$BACKEND" \

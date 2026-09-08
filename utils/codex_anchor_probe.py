@@ -3,7 +3,7 @@
 
 Fires a single ping for the given (model, effort, thread_source) variant via
 `./yo codex` — so the codex invocation under test is exactly the production
-one — then three spaced rateLimits reads decide the verdict: a real anchor
+one — then two spaced rateLimits reads decide the verdict: a real anchor
 locks resetsAt at ping+5h, while without one resetsAt is a hypothetical that
 drifts with query time. Never judge anchoring from the Codex web UI (it
 hides windows at 0% usage).
@@ -136,7 +136,7 @@ def window_state(reads):
     return "unknown"
 
 
-def probe(variant, command, log_path, wait=120, force=False):
+def probe(variant, command, log_path, wait=180, force=False):
     """Shared one-shot experiment: one production ping, with evidence and no retry."""
     result = {"variant": variant, "command": command, "started_at": time.time(),
               "outcome": "inconclusive", "pre": [], "reads": []}
@@ -154,7 +154,7 @@ def probe(variant, command, log_path, wait=120, force=False):
             result["ping_start"] = time.time()
             result["returncode"] = run_ping(**variant, command=command, log_path=log_path)
             result["ping_end"] = time.time()
-            for i in range(3):
+            for i in range(2):
                 if i:
                     time.sleep(wait)
                 result["reads"].append(read_rate_limits(command=command))
@@ -186,7 +186,7 @@ def main() -> int:
     parser.add_argument("--model", default=None)
     parser.add_argument("--effort", choices=["low", "medium", "high"], default=None)
     parser.add_argument("--thread-source", default=None)
-    parser.add_argument("--wait", type=int, default=120, help="seconds between verdict reads")
+    parser.add_argument("--wait", type=int, default=180, help="seconds between verdict reads")
     parser.add_argument("--force", action="store_true", help="send despite pre-check; verdict is inconclusive")
     args = parser.parse_args()
     if args.wait < 10:

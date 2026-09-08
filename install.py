@@ -126,7 +126,7 @@ def parse_args(argv=None):
     parser.add_argument("--backend", choices=BACKENDS,
                         help="Runner backend for a custom --command; a backend "
                              "name (codex/claude) is its own backend")
-    parser.add_argument("--experiment", action="store_true", help="Schedule opt-in experiment runs")
+    parser.add_argument("--experiment", action="store_true", help="Schedule opt-in experiment runs (codex backend only)")
     parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     args = parser.parse_args(argv)
     # --status and --remove act on the installed crontab without computing a
@@ -162,7 +162,7 @@ def hour_minute(t):
     return divmod(round(t * 60) % (24 * 60), 60)
 
 
-def compute_run_times(start, end, num_windows, window_hours):
+def compute_run_times(start, end, num_windows, window_hours, experiment=False):
     """Ping schedule (fractional hours) that re-anchors a 5h usage window.
 
     codex and claude both gate usage with a ~5h window anchored to your first
@@ -178,14 +178,16 @@ def compute_run_times(start, end, num_windows, window_hours):
             (callers add 24 to a wrapped overnight end).
         num_windows: Number of runs per day.
         window_hours: Hours each run covers.
+        experiment: Allow five minutes for verification and recovery instead of two.
 
     Returns:
         The run times as a list of fractional hours (see hour_minute).
     """
     slack = num_windows * window_hours - (end - start)
     block_start = start - slack / 2
+    stagger = 5 if experiment else STAGGER_MINUTES
     return [
-        block_start + i * window_hours + i * STAGGER_MINUTES / 60
+        block_start + i * window_hours + i * stagger / 60
         for i in range(num_windows)
     ]
 
@@ -435,6 +437,8 @@ def install_schedule(args):
 
     command = args.command
     backend = resolve_backend(command, args.backend)
+    if args.experiment and backend != "codex":
+        sys.exit(f"error: --experiment is only supported with the codex backend, not {backend}")
     cron_path = cron_path_for([command])  # resolves the command; errors if it's missing
     # Preflight: a malformed crontab should fail before the user approves anything.
     remove_managed_block(crontab, command)
@@ -449,7 +453,7 @@ def install_schedule(args):
             file=sys.stderr,
         )
 
-    run_times = compute_run_times(start, end, args.num_windows, args.window_hours)
+    run_times = compute_run_times(start, end, args.num_windows, args.window_hours, args.experiment)
     system_times = to_system_times(run_times, args.tz)
     cron_content = render_cron(system_times, args.tz, command, backend, cron_path, args.experiment)
 

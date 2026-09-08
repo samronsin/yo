@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Opt-in config/prompt trials with backend-specific execution and verification."""
+"""Opt-in Codex config/prompt trials, each verified against the observed quota reset."""
 import argparse
 import fcntl
 import hashlib
@@ -10,32 +10,44 @@ import random
 import shutil
 import subprocess
 import sys
-import time
 
 if __package__:
-    from .codex_anchor_probe import ROOT_DIR, probe, run_ping
+    from .codex_anchor_probe import ROOT_DIR, probe, window_state
 else:
-    from codex_anchor_probe import ROOT_DIR, probe, run_ping
+    from codex_anchor_probe import ROOT_DIR, probe, window_state
 
 PARAMETERS = {
-    "model": ["gpt-5.6-terra", "gpt-5.4-mini"],
+    "model": ["gpt-5.6-terra", "gpt-5.6-luna"],
     "effort": ["low", "medium", "high"],
     "thread_source": ["", "scheduled"],
     "prompt": ["yo", "Calculate 17 * 23 and explain in three short sentences. Do not use tools."],
 }
-GRIDS = {"codex": PARAMETERS, "claude": {
-    "model": ["haiku", "sonnet"], "effort": [""], "thread_source": [""],
-    "prompt": PARAMETERS["prompt"],
-}}
-SCORED = {"anchored", "not_anchored", "execution_error", "unverified"}
+BACKEND = "codex"  # the only backend with a quota observer; see check_backend
+SCORED = {"anchored", "not_anchored", "execution_error"}
+RECOVERY = {
+    "model": "gpt-5.6-sol", "effort": "high", "thread_source": "",
+    "prompt": (
+        "Solve this scheduling problem without tools or file changes. Tasks A through F "
+        "take 3, 5, 2, 7, 4, and 6 minutes respectively. C depends on A; D depends "
+        "on A and B; E depends on C; F depends on D and E. There are two identical "
+        "workers; tasks cannot be interrupted and each uses one worker. Find a "
+        "minimum-makespan schedule. Give task start/end times and worker assignments, "
+        "prove optimality with a lower bound, and explain how the optimum changes "
+        "if task B takes 9 minutes instead. Provide a self-contained explanation."
+    ),
+}
+
+
+def check_backend(args):
+    backend = getattr(args, "backend", BACKEND)
+    if backend != BACKEND:
+        raise ValueError(f"experiments are only supported with the {BACKEND} backend, not {backend}")
+    return backend
 
 
 def variants(args):
-    backend = getattr(args, "backend", "codex")
-    if backend == "claude" and (args.effort or args.thread_source):
-        raise ValueError("Claude experiments do not support --effort or --thread-source")
     axes = {key: [getattr(args, key)] if getattr(args, key, None) else values
-            for key, values in GRIDS[backend].items()}
+            for key, values in PARAMETERS.items()}
     return [dict(zip(axes, values)) for values in itertools.product(*axes.values())]
 
 
@@ -95,24 +107,9 @@ def report(data):
     return "\n".join(lines)
 
 
-def unverified_trial(variant, command, backend, log_path):
-    result = {"variant": variant, "command": command, "started_at": time.time(),
-              "pre": [], "reads": [], "outcome": "unverified"}
-    result["ping_start"] = time.time()
-    try:
-        result["returncode"] = run_ping(**variant, command=command, backend=backend, log_path=log_path)
-        if result["returncode"] != 0:
-            result["outcome"] = "execution_error"
-    except OSError as exc:
-        result.update(outcome="execution_error", error=str(exc))
-    result["ping_end"] = result["finished_at"] = time.time()
-    return result
-
-
 def run(args):
-    backend = getattr(args, "backend", "codex")
-    identity = args.command if backend == "codex" else f"{backend}:{args.command}"
-    command_key = hashlib.sha256(identity.encode()).hexdigest()[:16]
+    backend = check_backend(args)
+    command_key = hashlib.sha256(args.command.encode()).hexdigest()[:16]
     folder = ROOT_DIR / "logs" / "experiments" / command_key
     path = folder / "history.json"
     if getattr(args, "report", False):
@@ -122,7 +119,7 @@ def run(args):
     grid = variants(args)
     version = subprocess.run([args.command, "--version"], capture_output=True,
                              text=True, timeout=30, check=True).stdout.strip()
-    settings = {"schema": 4, "command": args.command, "backend": backend,
+    settings = {"schema": 5, "command": args.command, "backend": backend,
                 "executable": shutil.which(args.command), "version": version, "grid": grid}
     folder.mkdir(parents=True, exist_ok=True)
     with (folder / "lock").open("a") as lock:
@@ -138,10 +135,7 @@ def run(args):
             print(json.dumps({"path": str(path), "automatic_selection": False,
                               "next": selected["variant"], "results": stats}, indent=2))
             return 0
-        if backend == "codex":
-            result = probe(selected["variant"], args.command, folder / "probe.log")
-        else:
-            result = unverified_trial(selected["variant"], args.command, backend, folder / "probe.log")
+        result = probe(selected["variant"], args.command, folder / "probe.log")
         result["settings"] = settings
         data["settings"] = settings
         data["trials"].append(result)
@@ -150,14 +144,19 @@ def run(args):
         temp.write_text(json.dumps(data, indent=2) + "\n")
         temp.replace(path)
         print(f"experiment: {result['outcome']}; evidence={path}")
-        return {"anchored": 0, "no_data": 0, "unverified": 0,
-                "not_anchored": 3}.get(result["outcome"], 2)
+        # Persist the experimental verdict before spending any recovery traffic.
+        reads = result.get("reads", [])
+        if (result["outcome"] in {"not_anchored", "execution_error"}
+                and len(reads) >= 2 and window_state(reads) == "idle"):
+            result = probe(RECOVERY, args.command, folder / "recovery.log")
+            print(f"recovery: {result['outcome']}; evidence={folder / 'recovery.log'}")
+        return {"anchored": 0, "no_data": 0, "not_anchored": 3}.get(result["outcome"], 2)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command")
-    parser.add_argument("--backend", choices=GRIDS, required=True)
+    parser.add_argument("--backend", default=BACKEND, help=f"only {BACKEND} is supported")
     for name in ("model", "effort", "thread-source", "prompt"):
         parser.add_argument(f"--{name}", default="", help="pin this axis instead of exploring it")
     view = parser.add_mutually_exclusive_group()

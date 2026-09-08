@@ -33,8 +33,8 @@ the hours or commands, or `./install.py --remove claude` to stop. See
   (`codex` or `claude`) or any [custom command](#custom-commands) paired with
   `--backend`. An optional `--model` flag overrides the per-backend default
   (GPT-5.6-terra for Codex, Haiku for Claude).
-  Both send one `yo` prompt by default. `--experiment` opts into recorded trials,
-  independently of the backend (see below).
+  Both send one `yo` prompt by default. `--experiment` opts a Codex command into
+  recorded trials (see below).
 - **`install.py`** — generates and installs the crontab. Given a timezone and
   working hours, it builds a schedule that re-anchors each agent's 5h usage
   window across your day (see [Window model](#window-model)) and pipes the
@@ -55,25 +55,24 @@ Run once, ad hoc:
 
 ### Experiments
 
-`--experiment` tests one combination per call; `--backend` selects the CLI
-runner. The Codex grid in `utils/experiments.py:GRIDS` spans two models
-(`gpt-5.6-terra`, `gpt-5.4-mini`), three efforts (low/medium/high), two thread
-sources (default/scheduled), and two prompts (`yo`/a short calculation).
+`--experiment` tests one combination per call. Experiments are Codex-only:
+Codex exposes the quota reset the probe verifies against, Claude does not, so
+`yo` and `install.py` refuse `--experiment` on the Claude backend rather than
+record unverifiable trials. The grid in `utils/experiments.py:PARAMETERS` spans
+two models (`gpt-5.6-terra`, `gpt-5.6-luna`), three efforts (low/medium/high),
+two thread sources (default/scheduled), and two prompts (`yo`/a short calculation).
 These are candidates, not a promise that every model is available to your account.
-Claude explores Haiku/Sonnet and the same two prompts. Claude trials record
-execution, settings, and timing, but have outcome `unverified`: there is no
-Claude quota observer yet. They never count as verified anchoring successes.
 
 Explore the least-tested combinations in randomized order. Each experiment is
-a single ping, with no retries or multi-prompt sequences. Results describe that
+a single ping. Results describe that
 ping only; they do not prove independence from earlier traffic or a usage threshold.
 There is no automatic promotion of a winning configuration.
 Edit the grid to add models or prompts; CLI overrides pin an axis:
 
 ```sh
 ./yo codex --experiment --model gpt-5.6-terra # explore effort, source, prompt
-./yo claude --experiment                    # record unverified Claude trials
 ./yo codex-pro --backend codex --experiment-status
+./yo claude --experiment                    # error: codex backend only
 ./yo codex                                  # original single ping
 ./yo codex --prompt 'Calculate 17 * 23.'      # manual prompt, no learning
 ```
@@ -81,11 +80,10 @@ Edit the grid to add models or prompts; CLI overrides pin an axis:
 With `--experiment`, `--prompt` pins the prompt axis, just as `--model` pins
 the model. Without it, `--prompt` simply changes the one-shot prompt on either
 backend. `--no-experiment` remains a compatibility alias for ordinary mode and
-cannot be combined with experiment options. Claude experimentation currently
-rejects effort/thread-source overrides rather than silently ignoring them.
+cannot be combined with experiment options.
 
-For Codex, the probe checks the window with two readings 15 seconds apart, sends at most
-one ping, and takes three post-ping readings 120 seconds apart. An active or
+The probe checks the window with two readings 15 seconds apart, sends at most
+one ping, and reads the quota immediately after completion and again 180 seconds later. An active or
 ambiguous window is skipped.
 Already-open windows are recorded and reported as `no_data` with reason
 `window_already_open`: no prompt is sent and no success is credited.
@@ -93,6 +91,14 @@ Observation errors never score a combination; execution errors count as
 unsuccessful trials but remain distinguishable from
 anchoring failures. Other Codex activity during the request can confound
 attribution; an anchor outside the request interval is inconclusive.
+
+If the first ping leaves the window clearly closed, its result is saved before
+one recovery attempt: `gpt-5.6-sol`, high effort, with a fixed scheduling problem.
+Recovery rechecks the window before sending anything and uses the same verification
+timing. Its evidence goes only to `recovery.log`, never trial history or reports.
+There are at most two pings total; ambiguous or failed observations stop recovery.
+Exit status reflects the final operational result, without changing the first-ping
+experiment verdict. Ordinary pings do not use recovery.
 
 A per-command/backend lock prevents overlapping experiments. `history.json` and a
 probe log live in `logs/experiments/<command-hash>/`. Trial history continues
@@ -129,9 +135,13 @@ Existing cron jobs continue sending ordinary pings. Opt a schedule into experime
 ./install.py --tz Europe/Paris --hours 9-18 --command codex --experiment
 ```
 
+Experimental schedules space runs 5h 5m apart (ordinary schedules use 5h 2m).
+The five-minute margin allows time for verification and recovery before anchoring,
+but a slow request can exceed it; the next run skips any still-open window.
+
 Reinstall without `--experiment` to return it to ordinary pings. There is no
 immediate retry or automatic schedule rewriting.
-Exit codes are `0` for anchored/already active/busy or executed-but-unverified, `3` for not anchored, and
+Exit codes are `0` for anchored/already active/busy, `3` for not anchored, and
 `2` for execution errors or inconclusive observations.
 
 Install a schedule (review the snippet, confirm, and it's added to your crontab).
@@ -271,10 +281,10 @@ issues #9 and PR #14 for the history); when pings stop anchoring, re-bisect
 rather than trusting old conclusions. Two utilities support that:
 
 - `utils/codex_anchor_probe.py [--model M] [--effort E] [--thread-source S]` — fires
-  ONE ping via `./yo codex` in an unanchored gap, then takes three account
+  ONE ping via `./yo codex` in an unanchored gap, then takes two account
   rate-limit reads (via `codex app-server`, token-free): one right after the
-  ping and two more spaced `--wait` seconds apart — about 4 minutes total
-  with the 120s default. A real anchor locks `resetsAt` at ping+5h; without
+  ping and another `--wait` seconds later — about 3 minutes total
+  with the 180s default. A real anchor locks `resetsAt` at ping+5h; without
   one it drifts with query time. Change one variable per run; an ANCHORED
   verdict closes the gap for ~5h. Refuses to run while a window is open.
   `--command WRAPPER` selects the same wrapper for reads and the ping;

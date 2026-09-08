@@ -33,14 +33,18 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(len(pinned), 4)
         self.assertTrue(all(v["model"] == "custom-model" and v["effort"] == "high" for v in pinned))
 
-    def test_claude_grid_uses_only_supported_axes(self):
+    def test_grid_covers_terra_and_luna(self):
+        self.assertEqual(sorted({v["model"] for v in self.grid}), ["gpt-5.6-luna", "gpt-5.6-terra"])
+
+    def test_non_codex_backend_is_rejected_without_a_trial(self):
         self.args.backend = "claude"
-        grid = experiments.variants(self.args)
-        self.assertEqual(len(grid), 4)
-        self.assertTrue(all(v["effort"] == "" and v["thread_source"] == "" for v in grid))
-        self.args.effort = "high"
-        with self.assertRaisesRegex(ValueError, "do not support"):
-            experiments.variants(self.args)
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(experiments, "ROOT_DIR", Path(temp)):
+            with mock.patch.object(experiments, "probe") as probe, mock.patch.object(experiments.subprocess, "run") as run:
+                with self.assertRaisesRegex(ValueError, "only supported with the codex backend"):
+                    experiments.run(self.args)
+            probe.assert_not_called()
+            run.assert_not_called()
+            self.assertFalse((Path(temp) / "logs").exists())
 
     def test_screen_untried_before_repeating_success(self):
         trials = [{"variant": self.grid[0], "outcome": "anchored"}]
@@ -98,6 +102,51 @@ class ExperimentTests(unittest.TestCase):
                 "ping_start": at, "ping_end": at + 5,
                 "reads": [sample(t, at + 18000 if outcome == "anchored" else None)
                           for t in (at + 10, at + 130, at + 250)]}
+
+    def test_recovery_is_capped_and_never_changes_experiment_history(self):
+        for first_outcome in ("not_anchored", "execution_error"):
+            for recovery_outcome, code in (("anchored", 0), ("no_data", 0),
+                                           ("not_anchored", 3), ("inconclusive", 2),
+                                           ("execution_error", 2), ("observation_error", 2)):
+                with self.subTest(first=first_outcome, recovery=recovery_outcome), tempfile.TemporaryDirectory() as temp:
+                    first = {"variant": self.grid[0], "outcome": first_outcome,
+                             "reads": [sample(120), sample(300)]}
+
+                    def observe(variant, command, log_path):
+                        self.assertEqual(command, "wrapper")
+                        if log_path.name == "probe.log":
+                            return first
+                        self.assertEqual(log_path.name, "recovery.log")
+                        self.assertEqual(variant, experiments.RECOVERY)
+                        saved = json.loads(log_path.with_name("history.json").read_text())
+                        self.assertEqual(saved["trials"], [first])
+                        return {"variant": variant, "outcome": recovery_outcome}
+
+                    with mock.patch.object(experiments, "ROOT_DIR", Path(temp)), \
+                            mock.patch.object(experiments.subprocess, "run", return_value=mock.Mock(stdout="version")), \
+                            mock.patch.object(experiments, "probe", side_effect=observe) as probe, \
+                            redirect_stdout(io.StringIO()):
+                        self.assertEqual(experiments.run(self.args), code)
+                    self.assertEqual(probe.call_count, 2)
+                    saved = json.loads(next(Path(temp).glob("logs/experiments/*/history.json")).read_text())
+                    self.assertEqual(saved["trials"], [first])
+                    self.assertNotIn(experiments.RECOVERY["prompt"], experiments.report(saved))
+
+    def test_recovery_requires_a_failed_ping_and_clearly_idle_window(self):
+        cases = [(outcome, [sample(120), sample(300)]) for outcome in
+                 ("anchored", "no_data", "inconclusive", "observation_error")]
+        cases += [("execution_error", reads) for reads in
+                  ([], [sample(120)], [sample(120, 18120), sample(300, 18120)],
+                   [sample(120, 18120), sample(300, 18200)])]
+        for outcome, reads in cases:
+            with self.subTest(outcome=outcome, reads=reads), tempfile.TemporaryDirectory() as temp:
+                result = {"variant": self.grid[0], "outcome": outcome, "reads": reads}
+                with mock.patch.object(experiments, "ROOT_DIR", Path(temp)), \
+                        mock.patch.object(experiments.subprocess, "run", return_value=mock.Mock(stdout="version")), \
+                        mock.patch.object(experiments, "probe", return_value=result) as probe, \
+                        redirect_stdout(io.StringIO()):
+                    experiments.run(self.args)
+                probe.assert_called_once()
 
     def test_report_preserves_individual_evidence_and_omits_private_metadata(self):
         trials = [self.attempt(0, 1700000000, "not_anchored"),
@@ -191,13 +240,13 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(result["reason"], "window_already_open")
 
     def test_stable_anchor_in_request_interval_succeeds(self):
-        self.check_probe([sample(100), sample(115)] + [sample(t, 18118) for t in (120, 240, 360)], "anchored")
+        self.check_probe([sample(100), sample(115)] + [sample(t, 18118) for t in (120, 300)], "anchored")
 
     def test_external_anchor_is_inconclusive(self):
-        self.check_probe([sample(100), sample(115)] + [sample(t, 18000) for t in (120, 240, 360)], "inconclusive")
+        self.check_probe([sample(100), sample(115)] + [sample(t, 18000) for t in (120, 300)], "inconclusive")
 
     def test_drift_and_execution_errors_are_distinct(self):
-        reads = [sample(t) for t in (100, 115, 120, 240, 360)]
+        reads = [sample(t) for t in (100, 115, 120, 300)]
         self.check_probe(reads, "not_anchored")
         self.check_probe(reads, "execution_error", rc=7)
 
@@ -205,10 +254,12 @@ class ProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             with mock.patch.object(anchor, "read_rate_limits", side_effect=reads) as read:
                 with mock.patch.object(anchor, "run_ping", return_value=rc) as ping:
-                    with mock.patch.object(anchor.time, "sleep"), mock.patch.object(anchor.time, "time", side_effect=[90, 116, 120, 400]):
+                    with mock.patch.object(anchor.time, "sleep") as sleep, mock.patch.object(anchor.time, "time", side_effect=[90, 116, 120, 400]):
                         variant = {name: values[0] for name, values in experiments.PARAMETERS.items()}
                         result = anchor.probe(variant, "wrapper", Path(temp) / "probe.log")
+                    self.assertEqual(sleep.call_args_list, [mock.call(15), mock.call(180)] if calls else [mock.call(15)])
                 self.assertEqual(ping.call_count, calls)
+                self.assertEqual(read.call_count, len(reads))
                 self.assertTrue(all(c.kwargs == {"command": "wrapper"} for c in read.call_args_list))
             self.assertEqual(result["outcome"], outcome)
             return result
@@ -242,15 +293,14 @@ class DispatchTests(unittest.TestCase):
             claude = [str(root / "yo"), "wrapper", "--backend", "claude"]
             ordinary_claude = subprocess.run(claude, env=env, capture_output=True, timeout=10)
             self.assertEqual(ordinary_claude.returncode, 0, ordinary_claude.stderr)
-            claude_trial = subprocess.run(claude + ["--experiment", "--prompt", "test prompt"],
-                                          env=env, capture_output=True, timeout=10)
-            self.assertEqual(claude_trial.returncode, 0, claude_trial.stderr)
-            self.assertEqual(json.loads((root / "argv.json").read_text())[-1], "test prompt")
-            histories = [json.loads(p.read_text()) for p in (root / "logs/experiments").glob("*/history.json")]
-            self.assertEqual(len(histories), 2)
-            record = next(h for h in histories if h["settings"]["backend"] == "claude")["trials"][0]
-            self.assertEqual(record["outcome"], "unverified")
-            self.assertEqual(record["reads"], [])
+            (root / "argv.json").unlink()
+            for option in (["--experiment", "--prompt", "test prompt"], ["--experiment-status"], ["--experiment-report"]):
+                refused = subprocess.run(claude + option, env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(refused.returncode, 2, refused.stdout)
+                self.assertIn("only supported with the codex backend", refused.stderr)
+            self.assertFalse((root / "argv.json").exists())  # no prompt was sent
+            histories = list((root / "logs/experiments").glob("*/history.json"))
+            self.assertEqual(histories, [codex_history])  # no Claude history was created
             report = subprocess.run([str(root / "yo"), "missing-wrapper", "--backend", "codex",
                                      "--experiment-report"], env=env, capture_output=True, text=True, timeout=10)
             self.assertEqual(report.returncode, 0, report.stderr)
