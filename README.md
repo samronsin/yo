@@ -27,12 +27,14 @@ the hours or commands, or `./install.py --remove claude` to stop. See
 
 ## Components
 
-- **`yo`** — the runner. Invokes the selected agent CLI once with the prompt
-  `yo`, in a read-only/non-interactive mode, and writes the output to a
+- **`yo`** — the runner. Invokes the selected agent CLI in a
+  read-only/non-interactive mode, and writes the output to a
   per-command log. The command is a required first argument: a backend name
   (`codex` or `claude`) or any [custom command](#custom-commands) paired with
   `--backend`. An optional `--model` flag overrides the per-backend default
   (GPT-5.6-terra for Codex, Haiku for Claude).
+  Both send one `yo` prompt by default. `--experiment` opts into recorded trials,
+  independently of the backend (see below).
 - **`install.py`** — generates and installs the crontab. Given a timezone and
   working hours, it builds a schedule that re-anchors each agent's 5h usage
   window across your day (see [Window model](#window-model)) and pipes the
@@ -46,10 +48,91 @@ the hours or commands, or `./install.py --remove claude` to stop. See
 Run once, ad hoc:
 
 ```sh
-./yo codex                    # Codex, default model (GPT-5.6-terra)
+./yo codex                    # Codex, one default ping
 ./yo claude                   # Claude, default model (Haiku)
 ./yo claude --model opus      # Claude with an explicit model
 ```
+
+### Experiments
+
+`--experiment` tests one combination per call; `--backend` selects the CLI
+runner. The Codex grid in `utils/experiments.py:GRIDS` spans two models
+(`gpt-5.6-terra`, `gpt-5.4-mini`), three efforts (low/medium/high), two thread
+sources (default/scheduled), and two prompts (`yo`/a short calculation).
+These are candidates, not a promise that every model is available to your account.
+Claude explores Haiku/Sonnet and the same two prompts. Claude trials record
+execution, settings, and timing, but have outcome `unverified`: there is no
+Claude quota observer yet. They never count as verified anchoring successes.
+
+Explore the least-tested combinations in randomized order. Each experiment is
+a single ping, with no retries or multi-prompt sequences. Results describe that
+ping only; they do not prove independence from earlier traffic or a usage threshold.
+There is no automatic promotion of a winning configuration.
+Edit the grid to add models or prompts; CLI overrides pin an axis:
+
+```sh
+./yo codex --experiment --model gpt-5.6-terra # explore effort, source, prompt
+./yo claude --experiment                    # record unverified Claude trials
+./yo codex-pro --backend codex --experiment-status
+./yo codex                                  # original single ping
+./yo codex --prompt 'Calculate 17 * 23.'      # manual prompt, no learning
+```
+
+With `--experiment`, `--prompt` pins the prompt axis, just as `--model` pins
+the model. Without it, `--prompt` simply changes the one-shot prompt on either
+backend. `--no-experiment` remains a compatibility alias for ordinary mode and
+cannot be combined with experiment options. Claude experimentation currently
+rejects effort/thread-source overrides rather than silently ignoring them.
+
+For Codex, the probe checks the window with two readings 15 seconds apart, sends at most
+one ping, and takes three post-ping readings 120 seconds apart. An active or
+ambiguous window is skipped.
+Already-open windows are recorded and reported as `no_data` with reason
+`window_already_open`: no prompt is sent and no success is credited.
+Observation errors never score a combination; execution errors count as
+unsuccessful trials but remain distinguishable from
+anchoring failures. Other Codex activity during the request can confound
+attribution; an anchor outside the request interval is inconclusive.
+
+A per-command/backend lock prevents overlapping experiments. `history.json` and a
+probe log live in `logs/experiments/<command-hash>/`. Trial history continues
+across grid, CLI-version, and executable changes; each trial records its settings.
+Coverage counts are specific to the current settings. Reads use the same wrapper as the ping.
+Changing accounts behind a wrapper is not detected: use a separate command
+name per account. Status reads history without sending a prompt or checking
+quota. Status shows configuration coverage. This records individual observations,
+not a causal proof or a validated recipe for replay.
+Evidence from interrupted trials remains in logs
+but cannot score. Old per-grid history files are preserved, not automatically
+combined with the current history. Existing individual trial records are retained;
+obsolete sequence summaries are removed on the next write.
+
+To share observations in a GitHub issue, generate a Markdown report:
+
+```sh
+./yo codex-pro --backend codex --experiment-report > codex-experiments.md
+```
+
+This is an offline export, not an upload. A short table shows one row per trial;
+detailed evidence is in a collapsible JSON section. It includes exact
+prompts/configs, CLI versions, outcomes, request durations, and reset drift
+across verification reads. Full timestamps and raw readings stay in local
+history; the report omits them.
+Local paths, command names, raw errors/logs, and absolute timestamps are omitted.
+Literal prompts remain included, so review custom prompts before publishing.
+A report ID helps identify duplicate submissions. Token counts are not currently
+recorded, and external traffic is unknown; the report preserves those limitations.
+
+Existing cron jobs continue sending ordinary pings. Opt a schedule into experiments:
+
+```sh
+./install.py --tz Europe/Paris --hours 9-18 --command codex --experiment
+```
+
+Reinstall without `--experiment` to return it to ordinary pings. There is no
+immediate retry or automatic schedule rewriting.
+Exit codes are `0` for anchored/already active/busy or executed-but-unverified, `3` for not anchored, and
+`2` for execution errors or inconclusive observations.
 
 Install a schedule (review the snippet, confirm, and it's added to your crontab).
 One command per run — for several, run it once each:
@@ -124,8 +207,9 @@ Both Codex and Claude gate usage with a **~5-hour window anchored to your first
 message**: your first prompt opens the window and it resets a fixed time later
 (e.g. 9:00 → 14:00), rather than counting a sliding trailing total. That
 anchoring is the whole reason a "yo" ping helps — a well-timed first message
-decides *when* the window opens. Because both behave the same way, both agents
-get the same schedule.
+decides *when* the window opens. A successful Codex request is not sufficient
+evidence that it anchored; the experiment runner checks the observed reset.
+Both agents currently get the same schedule.
 
 To keep a freshly-anchored window live across the workday, `yo` *re-anchors* it:
 `--num-windows` pings spaced `--window-hours` apart, centered on your working
@@ -133,9 +217,8 @@ hours (the first ping fires a bit before you start). For `--hours 9-18` that's
 **06:00, 11:02, 16:04** — a new 5h block anchored roughly every 5 hours.
 
 > Both providers also enforce a separate **weekly limit** alongside the 5h
-> window. `yo`'s pings are tiny (a "yo" and a one-line reply), so even several a
-> day stay far below it — `yo` therefore ignores the weekly limit and schedules
-> only around the 5h window.
+> window. `yo` uses small prompts, but they still consume usage. Scheduling
+> around the 5h window does not increase or bypass the weekly allowance.
 >
 > This describes each provider's *current* published behavior, which changes
 > often. If Codex and Claude diverge, or either switches to a true *sliding*
@@ -194,6 +277,9 @@ rather than trusting old conclusions. Two utilities support that:
   with the 120s default. A real anchor locks `resetsAt` at ping+5h; without
   one it drifts with query time. Change one variable per run; an ANCHORED
   verdict closes the gap for ~5h. Refuses to run while a window is open.
+  `--command WRAPPER` selects the same wrapper for reads and the ping;
+  `--prompt TEXT` tests a custom prompt. This utility bypasses automatic
+  experiments so its one-shot trial remains independent.
 - `utils/codex_anchor_watch.py [--cron-time HH:MM] [--now]` — verifies a cron ping
   anchored: reads the firing times from the installed crontab's yo-codex block
   (`--cron-time` overrides), waits for the next firing (or judges the last
@@ -208,4 +294,5 @@ Don't judge anchoring from the Codex web UI — it hides windows at 0% usage.
   VM. `cron` only runs while the machine is up, so a laptop that sleeps overnight
   will miss its scheduled pings (and the anchoring they provide).
 - The agent CLI you select (`codex` and/or `claude`) on `PATH`.
+- Python 3.10+ on `PATH` for experiments and the anchor utilities.
 - `cron` (the installer pipes into `crontab`).

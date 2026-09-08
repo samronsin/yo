@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 PROMPT="yo"
 
-usage() { echo "usage: $(basename "$0") <command> [--backend codex|claude] [--model MODEL] [--effort EFFORT] [--thread-source SOURCE]" >&2; exit 2; }
+usage() { echo "usage: $(basename "$0") <command> [--backend codex|claude] [--model MODEL] [--effort EFFORT] [--thread-source SOURCE] [--prompt TEXT] [--experiment|--experiment-status|--experiment-report]" >&2; exit 2; }
 
 # Args: required first is the CLI command to invoke. It's either a canonical
 # backend name ("codex"/"claude", e.g. `yo claude`) or any command pointing at a
@@ -24,12 +24,21 @@ BACKEND=""
 MODEL=""
 EFFORT=""
 THREAD_SOURCE=""
+EXPERIMENT=false
+NO_EXPERIMENT=false
+EXPERIMENT_PROMPT=""
+EXPERIMENT_VIEW=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --backend)       [[ $# -ge 2 ]] || usage; BACKEND="$2"; shift 2 ;;
     --model)         [[ $# -ge 2 ]] || usage; MODEL="$2"; shift 2 ;;
     --effort)        [[ $# -ge 2 ]] || usage; EFFORT="$2"; shift 2 ;;
     --thread-source) [[ $# -ge 2 ]] || usage; THREAD_SOURCE="$2"; shift 2 ;;
+    --prompt)        [[ $# -ge 2 ]] || usage; PROMPT="$2"; EXPERIMENT_PROMPT="$2"; shift 2 ;;
+    --experiment)    EXPERIMENT=true; shift ;;
+    --no-experiment) NO_EXPERIMENT=true; shift ;;
+    --experiment-status) [[ -z "$EXPERIMENT_VIEW" ]] || usage; EXPERIMENT_VIEW=--status; shift ;;
+    --experiment-report) [[ -z "$EXPERIMENT_VIEW" ]] || usage; EXPERIMENT_VIEW=--report; shift ;;
     *)               usage ;;
   esac
 done
@@ -55,6 +64,18 @@ case "$BACKEND" in
   *) echo "error: --backend must be 'codex' or 'claude', got '$BACKEND'" >&2; exit 2 ;;
 esac
 
+if [[ "$NO_EXPERIMENT" == true && ( "$EXPERIMENT" == true || -n "$EXPERIMENT_VIEW" ) ]]; then
+  echo "error: --no-experiment conflicts with experiment options" >&2; exit 2
+fi
+if [[ "$EXPERIMENT" == true || -n "$EXPERIMENT_VIEW" ]]; then
+  experiment_args=()
+  [[ -n "$EXPERIMENT_VIEW" ]] && experiment_args=("$EXPERIMENT_VIEW")
+  exec python3 "$ROOT_DIR/utils/experiments.py" "$COMMAND" --backend "$BACKEND" \
+    --model "$MODEL" --effort "$EFFORT" --thread-source "$THREAD_SOURCE" \
+    --prompt="$EXPERIMENT_PROMPT" \
+    ${experiment_args[@]+"${experiment_args[@]}"}
+fi
+
 # Logs are named per command so separate runs stay separate.
 LOG_DIR="$ROOT_DIR/logs"
 LAST_MESSAGE_FILE="$LOG_DIR/yo-$COMMAND.last.txt"
@@ -64,27 +85,14 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 log_file="$LOG_DIR/yo-$COMMAND-$timestamp.log"
 
 run_codex() {
-  # Anchoring the 5h usage window is model-dependent (single-variable A/B
-  # pings in unanchored gaps, 2026-08-28/29, see PR #14): gpt-5.6-terra
-  # anchors with this plain invocation, gpt-5.4 only anchored with
-  # --thread-source scheduled (a codex >= 0.150 flag), and gpt-5.6-luna never
-  # anchors. Effort is irrelevant (mini@low anchored too), so keep medium.
-  # Default to gpt-5.6-terra — gpt-5.4's catalog upgrade target (gpt-5.4
-  # retires 2026-08-31T19:00Z), proven end-to-end by the 2026-08-29 04:30Z
-  # cron ping. Don't swap models without re-testing in an unanchored gap.
-  # Still no --ephemeral (b4ed61a: ephemeral runs only join, never anchor) and
-  # no --ignore-user-config (29b9fe7: drops ~/.codex/config.toml settings the
-  # ping needs). Non-ephemeral also persists runs to ~/.codex/sessions for
-  # auditing from cron logs.
+  # Keep manual pings and experiments on the same production invocation.
   local model="${MODEL:-gpt-5.6-terra}"
   local effort="${EFFORT:-medium}"
   local ts_args=()
   [[ -n "$THREAD_SOURCE" ]] && ts_args=(--thread-source "$THREAD_SOURCE")
-  # Unset --thread-source means codex's own default, "user" (verified on the
-  # wire for 0.150.x); log the effective value so bisection trails read true.
   echo "agent=$COMMAND backend=codex model=$model reasoning_effort=$effort thread_source=${THREAD_SOURCE:-user(default)}"
   "$COMMAND" exec \
-    "${ts_args[@]}" \
+    ${ts_args[@]+"${ts_args[@]}"} \
     --ignore-rules \
     --skip-git-repo-check \
     --sandbox read-only \

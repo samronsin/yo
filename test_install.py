@@ -149,6 +149,15 @@ class ResolveBackendTest(unittest.TestCase):
 
 
 class ParseArgsTest(unittest.TestCase):
+    def test_experiment_is_opt_in_and_rendered_for_either_backend(self):
+        for backend in ("codex", "claude"):
+            args = install.parse_args(["--tz", "UTC", "--hours", "9-18", "--command", backend])
+            self.assertFalse(args.experiment)
+            block = render_cron([6], "UTC", backend, backend, "/bin", experiment=True)
+            self.assertIn(f"{backend} --experiment\n", block)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            install.parse_args(["--status", "--experiment"])
+
     def _parse(self, *args):
         return install.parse_args([*args])
 
