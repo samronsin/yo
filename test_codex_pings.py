@@ -191,8 +191,7 @@ class DispatchTests(ScratchCase):
         shutil.copy(source / "tests/fixtures/fake_codex.py", cli)
         cli.chmod(0o755)
         self.argv = self.root / "argv.json"
-        self.env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}", FAKE_CODEX_ARGV=str(self.argv),
-                        YO_PROBE_SETTLE_SECS="0")
+        self.env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}", FAKE_CODEX_ARGV=str(self.argv))
         self.env.pop("CODEX_HOME", None)
         self.log_dir = self.root / "logs"
 
@@ -208,46 +207,38 @@ class DispatchTests(ScratchCase):
     def loaded(self):
         return pings.load_records("wrapper", self.log_dir)
 
-    def test_every_codex_ping_is_recorded_and_no_record_is_raw(self):
-        run = self.yo()
+    def test_a_codex_ping_flows_through_the_recorder_and_back_into_its_log(self):
+        # One real recorded ping (it pays the post-ping settle); the mocked
+        # RecordTests cover the other outcomes and exit codes.
+        run = self.yo("--prompt", "test prompt", "--model", "gpt-5.6-luna", "--thread-source", "scheduled")
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(run.stdout, "")  # cron stays quiet; the verdict lives in the logs
-        self.assertEqual(self.sent_prompt(), "yo")
+        self.assertEqual(self.sent_prompt(), "test prompt")
         (record,) = self.loaded()
         self.assertEqual((record["source"], record["outcome"], record["cli_version"], record["returncode"]),
-                         ("default", "observation_error", "codex-cli test-version", 0))
-        self.assertEqual(record["effective"], {"model": "gpt-5.6-terra", "effort": "medium", "thread_source": "", "prompt": "yo"})
+                         ("manual", "observation_error", "codex-cli test-version", 0))
+        self.assertEqual(record["effective"],
+                         {"model": "gpt-5.6-luna", "effort": "medium", "thread_source": "scheduled", "prompt": "test prompt"})
         self.assertIn("fixture has no quota api", record["read_error"])
         (ping_log,) = pings.run_logs("wrapper", self.log_dir)
         self.assertEqual(ping_log.resolve(), Path(record["log"]).resolve())
         text = ping_log.read_text()
-        self.assertIn("agent=wrapper backend=codex model=gpt-5.6-terra", text)
-        self.assertLess(text.index("yo end rc=0"), text.index("default ping: observation_error"))
+        self.assertIn("agent=wrapper backend=codex model=gpt-5.6-luna reasoning_effort=medium thread_source=scheduled", text)
+        self.assertLess(text.index("yo end rc=0"), text.index("manual ping: observation_error"))
         self.assertTrue(text.rstrip().splitlines()[-1].startswith("record: "))
+
+    def test_open_window_sends_nothing_and_no_record_is_raw(self):
+        open_window = json.dumps({"usedPercent": 12, "windowDurationMins": 300, "resetsAt": time.time() + 7200})
+        skipped = self.yo(env=self.env | {"FAKE_CODEX_QUOTA": open_window})
+        self.assertEqual(skipped.returncode, 0, skipped.stderr)
+        self.assertFalse(self.argv.exists())
+        self.assertEqual([r["outcome"] for r in self.loaded()], ["window_open"])
 
         raw = self.yo("--no-record", "--prompt", '17 * 23; $(touch not-executed) "quoted"')
         self.assertEqual(raw.returncode, 0, raw.stderr)
         self.assertEqual(self.sent_prompt(), '17 * 23; $(touch not-executed) "quoted"')
         self.assertFalse((self.root / "not-executed").exists())
         self.assertEqual(len(self.loaded()), 1)
-
-        manual = self.yo("--prompt", "test prompt", "--model", "gpt-5.6-luna", "--thread-source", "scheduled")
-        self.assertEqual(manual.returncode, 0, manual.stderr)
-        self.assertEqual(self.sent_prompt(), "test prompt")
-        self.assertEqual(self.loaded()[-1]["source"], "manual")
-        self.assertEqual(self.loaded()[-1]["effective"],
-                         {"model": "gpt-5.6-luna", "effort": "medium", "thread_source": "scheduled", "prompt": "test prompt"})
-
-        open_window = json.dumps({"usedPercent": 12, "windowDurationMins": 300, "resetsAt": time.time() + 7200})
-        skipped = self.yo(env=self.env | {"FAKE_CODEX_QUOTA": open_window})
-        self.assertEqual(skipped.returncode, 0, skipped.stderr)
-        self.assertFalse(self.argv.exists())
-        self.assertEqual(self.loaded()[-1]["outcome"], "window_open")
-
-        failed = self.yo(env=self.env | {"FAKE_CODEX_RC": "7"})
-        self.assertEqual(failed.returncode, 7)
-        self.assertEqual(self.loaded()[-1]["outcome"], "execution_error")
-        self.assertEqual(len(self.loaded()), 4)
 
     def test_claude_stays_plain(self):
         plain = self.yo(backend="claude")
