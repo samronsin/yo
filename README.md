@@ -42,9 +42,11 @@ the hours or commands, or `./install.py --remove claude` to stop. See
   result into your crontab. The schedule is computed in your `--tz` and then
   **converted to the system time cron actually schedules against** (see
   [Timezones](#timezones)).
-- **`utils/codex_runner.py`** — the Codex backend `yo` execs into: owns the
+- **`utils/codex_runner.py`** — the Codex backend called by `yo`: owns the
   Codex invocation and, with `--probe`, verifies and records the ping.
-- **`test_install.py`**, **`test_codex_runner.py`** — unit tests.
+- **`utils/claude_runner.py`** — the Claude backend: sends a plain ping and
+  writes its output and exit status to the run log.
+- **`test_install.py`**, **`test_codex_runner.py`**, **`test_yo.py`** — tests.
 
 ## Usage
 
@@ -262,5 +264,5 @@ Don't judge anchoring from the Codex web UI — it hides windows at 0% usage.
   VM. `cron` only runs while the machine is up, so a laptop that sleeps overnight
   will miss its scheduled pings (and the anchoring they provide).
 - The agent CLI you select (`codex` and/or `claude`) on `PATH`.
-- Python 3.10+ on `PATH` for the Codex recorder and the anchor utilities.
+- Python 3.10+ (`python3`) on `PATH` for `yo`, the installer, and the utilities.
 - `cron` (the installer pipes into `crontab`).

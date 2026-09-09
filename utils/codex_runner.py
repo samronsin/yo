@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """yo's Codex backend: send one ping and, with --probe, verify and record it.
 
-`yo <codex command>` execs into here. The production invocation lives in
+`yo <codex command>` calls this runner. The production invocation lives in
 codex_command(). A plain run sends it and writes the run log
 (logs/yo-<command>-<timestamp>.log). With --probe the ping is bracketed by
 utils/codex_anchor_probe.py's token-free quota reads and the run log ends
