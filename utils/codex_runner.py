@@ -183,12 +183,9 @@ def load_records(command, log_dir=None):
     return records
 
 
-def say(log_file, message):
-    """Verdicts go to the run log; stdout only when someone is watching (cron stays quiet)."""
+def append(log_file, *lines):
     with open(log_file, "a") as log:
-        log.write(message + "\n")
-    if sys.stdout.isatty():
-        print(message, flush=True)
+        log.write("".join(line + "\n" for line in lines))
 
 
 def run(args):
@@ -210,8 +207,7 @@ def run(args):
             if not log_file.exists():
                 break
             log_file = log_dir / f"yo-{args.command}-{utc}-{n}.log"
-        with open(log_file, "a") as log:
-            log.write(f"[{stamp()}] yo start\nroot={ROOT_DIR}\n")
+        append(log_file, f"[{stamp()}] yo start", f"root={ROOT_DIR}")
         last_message_file = log_dir / f"yo-{args.command}.last.txt"
         record = probe(lambda: send_ping(args.command, config, log_file, last_message_file), args.command)
         record.update(schema=SCHEMA, command=args.command, executable=shutil.which(args.command),
@@ -219,10 +215,11 @@ def run(args):
                       effective={**config, "prompt": PROMPT})
         record.setdefault("cli_version", cli_version(args.command))
         if record["outcome"] == "window_open":
-            say(log_file, f"[{stamp()}] yo end rc=0 (window already open, nothing sent)")
-        say(log_file, f"[{stamp()}] {record['source']} ping: {record['outcome']}")
-        with open(log_file, "a") as log:
-            log.write(RECORD_PREFIX + json.dumps(record, sort_keys=True) + "\n")
+            append(log_file, f"[{stamp()}] yo end rc=0 (window already open, nothing sent)")
+        verdict = f"[{stamp()}] {record['source']} ping: {record['outcome']}"
+        append(log_file, verdict, RECORD_PREFIX + json.dumps(record, sort_keys=True))
+        if sys.stdout.isatty():  # someone is watching; cron stays quiet
+            print(verdict, flush=True)
         if record["outcome"] == "execution_error":
             return record.get("returncode") or 2
         return EXIT_CODES.get(record["outcome"], 2)
