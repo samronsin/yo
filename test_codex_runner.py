@@ -219,7 +219,6 @@ class RunTests(ScratchCase):
             self.assertEqual(self.records()[-1]["source"], "manual")
             self.assertEqual(self.records()[-1]["effective"]["model"], "gpt-5.6-luna")
         self.assertEqual(len(self.records()), 6)
-        self.assertEqual(len(runner.run_logs("wrapper", self.log_dir)), 6)  # same-second runs never share a log
 
     def test_concurrent_run_is_skipped_and_other_backends_are_refused(self):
         self.log_dir.mkdir(parents=True)

@@ -14,7 +14,6 @@ import argparse
 import datetime
 import fcntl
 import glob
-import itertools
 import json
 import os
 import re
@@ -164,15 +163,12 @@ def cli_version(command):
 
 
 def run_logs(command, log_dir=None):
-    """This command's run logs, oldest first (a same-second collision suffix sorts after its base)."""
-    def order(path):
-        found = re.fullmatch(rf"yo-{re.escape(command)}-(\d{{8}}T\d{{6}}Z)(?:-(\d+))?\.log", path.name)
-        return (found.group(1), int(found.group(2) or 1)) if found else (path.name, 0)
-    return sorted((log_dir or ROOT_DIR / "logs").glob(f"yo-{command}-*.log"), key=order)
+    """This command's run logs, oldest first (the name carries the UTC timestamp)."""
+    return sorted((log_dir or ROOT_DIR / "logs").glob(f"yo-{command}-*.log"))
 
 
 def load_records(command, log_dir=None):
-    """Every recorded ping for `command`, oldest first (one per run log)."""
+    """Every recorded ping for `command`, oldest first."""
     records = []
     for log in run_logs(command, log_dir):
         for line in log.read_text(errors="replace").splitlines():
@@ -198,10 +194,6 @@ def run(args):
     config = {key: overrides[key] or DEFAULTS[key] for key in DEFAULTS}
     utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log_file = log_dir / f"yo-{args.command}-{utc}.log"
-    for n in itertools.count(2):  # never share a log: it holds at most one record
-        if not log_file.exists():
-            break
-        log_file = log_dir / f"yo-{args.command}-{utc}-{n}.log"
     last_message_file = log_dir / f"yo-{args.command}.last.txt"
     append(log_file, f"[{stamp()}] yo start", f"root={ROOT_DIR}")
     if not getattr(args, "probe", False):
