@@ -62,7 +62,7 @@ case "$BACKEND" in
 esac
 
 # Every Codex ping is verified against the account's quota reset and recorded
-# as one JSON line in logs/yo-<command>.pings.jsonl (utils/codex_pings.py).
+# at the end of its own run log as a `record: {...}` line (utils/codex_pings.py).
 # The recorder sends the actual ping by calling back here with --no-record,
 # which is also the raw path for a quick unrecorded smoke test. Claude has no
 # quota observer, so it always takes the plain path.
@@ -93,7 +93,7 @@ run_codex() {
   # no --ignore-user-config (29b9fe7: drops ~/.codex/config.toml settings the
   # ping needs). Non-ephemeral also persists runs to ~/.codex/sessions for
   # auditing from cron logs. Every recorded ping now carries its own verdict
-  # (logs/yo-<command>.pings.jsonl), so check there before trusting the above.
+  # (the `record:` line in its run log), so check there before trusting the above.
   local model="${MODEL:-gpt-5.6-terra}"
   local effort="${EFFORT:-medium}"
   local ts_args=()

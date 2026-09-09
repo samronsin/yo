@@ -72,13 +72,14 @@ clock. So every `yo` run on the Codex backend goes through
    this ping). A ping that failed is `execution_error`; one whose quota could
    not be read afterwards is `observation_error`. A failed pre-read never
    blocks the ping.
-4. **Record.** One JSON line appended to `logs/yo-<command>.pings.jsonl`
-   with the effective model, effort, thread source and prompt, the CLI
+4. **Record.** The per-run `yo-<command>-<timestamp>.log` is written as
+   before and now ends with a verdict line and one `record: {...}` JSON line
+   holding the effective model, effort, thread source and prompt, the CLI
    version and executable, the quota reads, the session id and token usage
    (including cached input tokens, read from the CLI's own session rollout),
    the outcome, and whether the config was yo's `default` or a `manual`
-   override. The per-run `yo-<command>-<timestamp>.log` is written as before
-   and ends with the verdict.
+   override. Each run log is one ping's complete evidence; the series is a
+   grep over them.
 
 Exit status is `0` whenever a window is open or the run could not be judged,
 `3` when the window is verifiably still closed, and the ping's own status
@@ -90,7 +91,7 @@ verified.
 ./yo codex                               # default ping, verified and recorded
 ./yo codex --no-record                   # raw ping, nothing recorded (smoke test)
 ./yo codex --prompt 'Calculate 17 * 23.'  # manual override, recorded as such
-tail -1 logs/yo-codex.pings.jsonl | python3 -m json.tool
+grep -h '^record: ' logs/yo-codex-*.log | sed 's/^record: //' | python3 -m json.tool
 ```
 
 Install a schedule (review the snippet, confirm, and it's added to your crontab).
@@ -221,15 +222,15 @@ another timezone), **re-run `install.py`** to re-anchor the schedule.
 ## Logs
 
 Written under `logs/` as `yo-<command>-<timestamp>.log`, with the final message
-in `yo-<command>.last.txt`. Codex commands also get `yo-<command>.pings.jsonl`,
-one line per recorded ping (see [Recorded Codex pings](#recorded-codex-pings)).
+in `yo-<command>.last.txt`. Codex run logs end with a `record:` line holding
+the ping's verified outcome (see [Recorded Codex pings](#recorded-codex-pings)).
 
 ## Anchor test utilities
 
 The server-side rules for which pings anchor a 5h window shift silently (see
 issues #9 and PR #14 for the history); when pings stop anchoring, re-bisect
 rather than trusting old conclusions. Every recorded ping already carries its
-verdict (`logs/yo-<command>.pings.jsonl`), so start there. Two utilities remain for
+verdict (the `record:` line in its run log), so start there. Two utilities remain for
 one-off work:
 
 - `utils/codex_anchor_probe.py [--command WRAPPER] [--model M] [--effort E]

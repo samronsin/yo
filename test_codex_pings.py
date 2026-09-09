@@ -135,7 +135,7 @@ class ProbeTests(ScratchCase):
 class RecordTests(ScratchCase):
     def setUp(self):
         super().setUp()
-        self.path = self.root / "logs" / "yo-wrapper.pings.jsonl"
+        self.log_dir = self.root / "logs"
         self.patch(pings, "ROOT_DIR", self.root)
         self.patch(pings, "cli_version", return_value="0.153.4")
         self.patch(pings.shutil, "which", return_value="/opt/bin/wrapper")
@@ -149,7 +149,7 @@ class RecordTests(ScratchCase):
         return mock.patch.object(pings, "probe", side_effect=fake_probe)
 
     def records(self):
-        return pings.load_records(self.path)
+        return pings.load_records("wrapper", self.log_dir)
 
     def test_each_run_appends_one_line_with_identity_and_exit_codes(self):
         with self.probe_returning("anchored") as probe:
@@ -167,8 +167,8 @@ class RecordTests(ScratchCase):
         self.assertEqual(len(self.records()), 6)
 
     def test_concurrent_run_is_skipped_and_other_backends_are_refused(self):
-        self.path.parent.mkdir(parents=True)
-        with self.path.with_suffix(".lock").open("a") as held:
+        self.log_dir.mkdir(parents=True)
+        with (self.log_dir / "yo-wrapper.lock").open("a") as held:
             fcntl.flock(held, fcntl.LOCK_EX)
             with self.probe_returning("anchored") as probe, redirect_stderr(io.StringIO()) as err:
                 self.assertEqual(pings.run(args_for()), 0)
@@ -193,7 +193,7 @@ class DispatchTests(ScratchCase):
         self.argv = self.root / "argv.json"
         self.env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}", FAKE_CODEX_ARGV=str(self.argv))
         self.env.pop("CODEX_HOME", None)
-        self.records = self.root / "logs" / "yo-wrapper.pings.jsonl"
+        self.log_dir = self.root / "logs"
 
     def yo(self, *args, env=None, backend="codex"):
         return subprocess.run([str(self.root / "yo"), "wrapper", "--backend", backend, *args],
@@ -205,7 +205,7 @@ class DispatchTests(ScratchCase):
         return prompt
 
     def loaded(self):
-        return [json.loads(line) for line in self.records.read_text().splitlines()]
+        return pings.load_records("wrapper", self.log_dir)
 
     def test_every_codex_ping_is_recorded_and_no_record_is_raw(self):
         run = self.yo()
@@ -217,10 +217,12 @@ class DispatchTests(ScratchCase):
                          ("default", "observation_error", "codex-cli test-version", 0))
         self.assertEqual(record["effective"], {"model": "gpt-5.6-terra", "effort": "medium", "thread_source": "", "prompt": "yo"})
         self.assertIn("fixture has no quota api", record["read_error"])
-        ping_log = Path(record["log"]).read_text()
-        self.assertIn("agent=wrapper backend=codex model=gpt-5.6-terra", ping_log)
-        self.assertIn("default ping: observation_error", ping_log)
-        self.assertEqual(sorted(p.name for p in self.records.parent.glob("yo-wrapper-*.log")), [Path(record["log"]).name])
+        (ping_log,) = pings.run_logs("wrapper", self.log_dir)
+        self.assertEqual(ping_log.resolve(), Path(record["log"]).resolve())
+        text = ping_log.read_text()
+        self.assertIn("agent=wrapper backend=codex model=gpt-5.6-terra", text)
+        self.assertLess(text.index("yo end rc=0"), text.index("default ping: observation_error"))
+        self.assertTrue(text.rstrip().splitlines()[-1].startswith("record: "))
 
         raw = self.yo("--no-record", "--prompt", '17 * 23; $(touch not-executed) "quoted"')
         self.assertEqual(raw.returncode, 0, raw.stderr)
@@ -250,7 +252,8 @@ class DispatchTests(ScratchCase):
         plain = self.yo(backend="claude")
         self.assertEqual(plain.returncode, 0, plain.stderr)
         self.assertEqual(self.sent_prompt(), "yo")
-        self.assertFalse(self.records.exists())
+        self.assertEqual(self.loaded(), [])
+        self.assertEqual(len(pings.run_logs("wrapper", self.log_dir)), 1)  # the plain run log, no record
 
     def test_hyphen_leading_prompts_reach_the_model_not_the_option_parser(self):
         for backend in ("codex", "claude"):
