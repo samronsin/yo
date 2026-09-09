@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """yo's Codex backend: send one ping and, with --probe, verify and record it.
 
 `yo <codex command>` calls this runner. The production invocation lives in
@@ -10,7 +9,6 @@ effort, thread source, prompt, CLI version, executable), the quota reads,
 token usage including cached input, and the outcome. The series is a grep
 over the run logs; see load_records.
 """
-import argparse
 import datetime
 import fcntl
 import glob
@@ -175,21 +173,30 @@ def append(log_file, *lines):
         log.write("".join(line + "\n" for line in lines))
 
 
-def run(args):
-    if getattr(args, "backend", BACKEND) != BACKEND:
-        raise ValueError(f"{__name__} only runs the {BACKEND} backend, not {args.backend}")
+def open_run_log(command):
+    """Start this run's log and return (log_file, last_message_file).
+
+    Both backends log here so the names stay the ones run_logs() globs and
+    install.py's status points at: yo-<command>-<UTC stamp>.log and
+    yo-<command>.last.txt under logs/.
+    """
     log_dir = ROOT_DIR / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
+    utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    log_file = log_dir / f"yo-{command}-{utc}.log"
+    append(log_file, f"[{stamp()}] yo start", f"root={ROOT_DIR}")
+    return log_file, log_dir / f"yo-{command}.last.txt"
+
+
+def run(args):
+    """yo's Codex backend: args are yo's parsed arguments (command, model, effort, thread_source, probe)."""
     overrides = {key: getattr(args, key, "") or "" for key in DEFAULTS}
     config = {key: overrides[key] or DEFAULTS[key] for key in DEFAULTS}
-    utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    log_file = log_dir / f"yo-{args.command}-{utc}.log"
-    last_message_file = log_dir / f"yo-{args.command}.last.txt"
-    append(log_file, f"[{stamp()}] yo start", f"root={ROOT_DIR}")
+    log_file, last_message_file = open_run_log(args.command)
     if not getattr(args, "probe", False):
         return send_ping(args.command, config, log_file, last_message_file)["returncode"]
 
-    with (log_dir / f"yo-{args.command}.lock").open("a") as lock:
+    with (log_file.parent / f"yo-{args.command}.lock").open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -209,22 +216,3 @@ def run(args):
             return record.get("returncode") or 2
         return EXIT_CODES.get(record["outcome"], 2)
 
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("command")
-    parser.add_argument("--backend", default=BACKEND, help=f"only {BACKEND} is supported")
-    for name in ("model", "effort", "thread-source"):
-        parser.add_argument(f"--{name}", default="", help="override the default")
-    parser.add_argument("--probe", action="store_true",
-                        help="verify the ping against the quota reset and record the verdict")
-    args = parser.parse_args()
-    try:
-        return run(args)
-    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
-        print(f"{args.command}: {exc}", file=sys.stderr)
-        return 2
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -218,7 +218,7 @@ class RunTests(ScratchCase):
             self.assertEqual(self.records()[-1]["effective"]["model"], "gpt-5.6-luna")
         self.assertEqual(len(self.records()), 6)
 
-    def test_concurrent_run_is_skipped_and_other_backends_are_refused(self):
+    def test_concurrent_run_is_skipped(self):
         self.log_dir.mkdir(parents=True)
         with (self.log_dir / "yo-wrapper.lock").open("a") as held:
             fcntl.flock(held, fcntl.LOCK_EX)
@@ -227,10 +227,6 @@ class RunTests(ScratchCase):
         probe.assert_not_called()
         self.assertIn("skipped", err.getvalue())
         self.assertEqual(self.records(), [])
-        with self.probe_returning("anchored") as probe:
-            with self.assertRaisesRegex(ValueError, "only runs the codex backend"):
-                runner.run(args_for(backend="claude"))
-        probe.assert_not_called()
 
 
 if __name__ == "__main__":

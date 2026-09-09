@@ -103,6 +103,15 @@ class CronPathForTest(unittest.TestCase):
             # codex's dir is prepended once; claude's (a base dir) isn't duplicated
             self.assertEqual(cron_path_for(["codex", "claude"]), "/opt/foo/bin:" + BASE_CRON_PATH)
 
+    def test_python3_is_resolved_alongside_the_command(self):
+        mapping = {"codex": "/opt/foo/bin/codex", "python3": "/opt/py/bin/python3"}
+        with mock.patch("install.shutil.which", self._which(mapping)):
+            self.assertEqual(cron_path_for(["codex", "python3"]), "/opt/foo/bin:/opt/py/bin:" + BASE_CRON_PATH)
+        with mock.patch("install.shutil.which", self._which({"codex": "/opt/foo/bin/codex"})):
+            with self.assertRaises(SystemExit) as cm:
+                cron_path_for(["codex", "python3"])
+        self.assertIn("'python3' not found", str(cm.exception))
+
     def test_missing_agent_exits(self):
         with mock.patch("install.shutil.which", self._which({})):
             with self.assertRaises(SystemExit) as cm:
@@ -139,12 +148,12 @@ class ResolveBackendTest(unittest.TestCase):
     def test_bare_backend_with_matching_flag_ok(self):
         self.assertEqual(resolve_backend("codex", "codex"), "codex")
 
-    def test_bare_backend_with_conflicting_flag_exits(self):
-        with self.assertRaises(SystemExit):
+    def test_bare_backend_with_conflicting_flag_is_an_argument_error(self):
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "drop --backend"):
             resolve_backend("codex", "claude")
 
-    def test_custom_command_without_backend_exits(self):
-        with self.assertRaises(SystemExit):
+    def test_custom_command_without_backend_is_an_argument_error(self):
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "pass --backend"):
             resolve_backend("work-ai", None)
 
 

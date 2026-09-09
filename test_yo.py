@@ -25,8 +25,7 @@ class DispatchTests(ScratchCase):
     def setUp(self):
         super().setUp()
         self.install_fake_cli()
-        self.patch(codex_runner, "ROOT_DIR", self.root)
-        self.patch(claude_runner, "ROOT_DIR", self.root)
+        self.patch(codex_runner, "ROOT_DIR", self.root)  # claude_runner logs through codex_runner's helpers
         self.log_dir = self.root / "logs"
 
     def invoke(self, *args, backend="codex", env=None):
@@ -56,7 +55,8 @@ class DispatchTests(ScratchCase):
     def test_invalid_arguments_fail_before_running(self):
         cases = [[], [""], ["wrapper"], ["codex", "--backend", "claude"],
                  ["claude", "--probe"], ["codex", "--model"], ["codex", "--backend", "other"],
-                 ["codex", "--unknown"], ["codex", "--pro"], ["codex", "--prompt", "hi"]]
+                 ["codex", "--unknown"], ["codex", "--pro"], ["codex", "--prompt", "hi"],
+                 ["sub/dir", "--backend", "codex"], ["--backend", "claude", "--", "--probe"]]
         with mock.patch.object(codex_runner, "run") as codex, mock.patch.object(claude_runner, "run") as claude:
             for argv in cases:
                 with self.subTest(argv=argv), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exc:
@@ -85,6 +85,18 @@ class DispatchTests(ScratchCase):
                 self.assertEqual((self.log_dir / "yo-wrapper.last.txt").read_text(), "391\n")
                 self.assertEqual(codex_runner.load_records("wrapper", self.log_dir), [])
 
+    def test_claude_run_log_is_terminated_even_when_the_last_message_file_fails(self):
+        last = self.log_dir / "yo-wrapper.last.txt"
+        self.log_dir.mkdir()
+        last.write_text("stale")
+        last.chmod(0o444)
+        self.addCleanup(last.chmod, 0o644)
+        self.assertEqual(self.invoke(backend="claude"), 1)  # invoke() asserts stderr stayed empty
+        self.assertFalse(self.argv.exists())  # nothing was sent
+        log = codex_runner.run_logs("wrapper", self.log_dir)[-1].read_text()
+        self.assertIn("Permission denied", log)
+        self.assertTrue(log.rstrip().endswith("yo end rc=1"), log)
+
     def test_probed_ping_records_and_open_window_skips(self):
         with mock.patch.object(anchor.time, "sleep"):
             self.assertEqual(self.invoke("--probe", "--model", "gpt-5.6-luna",
@@ -92,8 +104,8 @@ class DispatchTests(ScratchCase):
         argv = self.sent_argv()
         self.assertEqual((argv[-1], argv[argv.index("--thread-source") + 1]), ("yo", "scheduled"))
         (record,) = codex_runner.load_records("wrapper", self.log_dir)
-        self.assertEqual((record["source"], record["outcome"], record["returncode"]),
-                         ("manual", "observation_error", 0))
+        self.assertEqual((record["source"], record["outcome"], record["returncode"], record["cli_version"]),
+                         ("manual", "observation_error", 0, "codex-cli test-version"))
         self.assertEqual(record["effective"], {"model": "gpt-5.6-luna", "effort": "medium",
                                                "thread_source": "scheduled", "prompt": "yo"})
         self.assertIn("fixture has no quota api", record["read_error"])

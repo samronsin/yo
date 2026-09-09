@@ -4,24 +4,22 @@ import argparse
 import subprocess
 import sys
 
-from install import BACKENDS, resolve_backend
+from install import BACKENDS, command_name, resolve_backend
 from utils import claude_runner, codex_runner
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    parser.add_argument("command")
+    parser.add_argument("command", type=command_name)
     parser.add_argument("--backend", choices=BACKENDS)
     for name in ("model", "effort", "thread-source"):
         parser.add_argument(f"--{name}", default="")
     parser.add_argument("--probe", action="store_true")
     args = parser.parse_args(argv)
-    if not args.command:
-        parser.error("command must not be empty")
     try:
         args.backend = resolve_backend(args.command, args.backend)
-    except SystemExit as exc:
-        parser.exit(2, f"{exc}\n")
+    except argparse.ArgumentTypeError as exc:
+        parser.error(str(exc))
     if args.probe and args.backend != "codex":
         parser.error("--probe is only supported with the codex backend (Claude exposes no quota window to verify against)")
     runner = codex_runner if args.backend == "codex" else claude_runner
