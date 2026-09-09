@@ -24,14 +24,14 @@ BACKEND=""
 MODEL=""
 EFFORT=""
 THREAD_SOURCE=""
-NO_RECORD=false
+RECORD=true
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --backend)       [[ $# -ge 2 ]] || usage; BACKEND="$2"; shift 2 ;;
     --model)         [[ $# -ge 2 ]] || usage; MODEL="$2"; shift 2 ;;
     --effort)        [[ $# -ge 2 ]] || usage; EFFORT="$2"; shift 2 ;;
     --thread-source) [[ $# -ge 2 ]] || usage; THREAD_SOURCE="$2"; shift 2 ;;
-    --no-record)     NO_RECORD=true; shift ;;
+    --no-record)     RECORD=false; shift ;;
     *)               usage ;;
   esac
 done
@@ -62,7 +62,7 @@ esac
 # The recorder sends the actual ping by calling back here with --no-record,
 # which is also the raw path for a quick unrecorded smoke test. Claude has no
 # quota observer, so it always takes the plain path.
-if [[ "$BACKEND" == codex && "$NO_RECORD" != true ]]; then
+if [[ "$BACKEND" == codex && "$RECORD" == true ]]; then
   exec python3 "$ROOT_DIR/utils/codex_pings.py" "$COMMAND" \
     --model "$MODEL" --effort "$EFFORT" --thread-source "$THREAD_SOURCE"
 fi
