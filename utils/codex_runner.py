@@ -37,21 +37,11 @@ EXIT_CODES = {"anchored": 0, "window_open": 0, "inconclusive": 0, "observation_e
 
 
 def codex_command(command, config, last_message_file):
-    """The production ping invocation; every recorded ping and probe sends exactly this.
+    """Build the shared Codex invocation for plain pings and probes.
 
-    Anchoring the 5h usage window is model-dependent (single-variable A/B pings
-    in unanchored gaps, 2026-08-28/29, see PR #14): gpt-5.6-terra anchors with
-    this plain invocation, gpt-5.4 only anchored with --thread-source scheduled
-    (a codex >= 0.150 flag), and gpt-5.6-luna never anchors. Effort is
-    irrelevant (mini@low anchored too), so keep medium. Default to
-    gpt-5.6-terra, gpt-5.4's catalog upgrade target (gpt-5.4 retires
-    2026-08-31T19:00Z), proven end-to-end by the 2026-08-29 04:30Z cron ping.
-    Every recorded ping now carries its own verdict, so check the records
-    before trusting the above. Still no --ephemeral (b4ed61a: ephemeral runs
-    only join, never anchor) and no --ignore-user-config (29b9fe7: drops
-    ~/.codex/config.toml settings the ping needs). Non-ephemeral also persists
-    runs to ~/.codex/sessions, where session_usage reads token counts back.
-    An unset thread source means codex's own default, "user".
+    Preserve user config and session persistence: they affect anchoring, and
+    session_usage needs the saved rollout. See PR #14 for experiment history;
+    check recent probe records before changing the defaults.
     """
     args = [command, "exec"]
     if config["thread_source"]:
