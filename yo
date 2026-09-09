@@ -14,7 +14,9 @@ usage() { echo "usage: $(basename "$0") <command> [--backend codex|claude] [--mo
 # actual command invoked and the per-command log/crontab key, so several
 # coexist. Optional --model/--effort/--thread-source/--prompt override the
 # defaults (codex only for effort and thread source) so the recorder can vary
-# them through this script instead of duplicating the codex invocation.
+# them through this script instead of duplicating the codex invocation. The
+# prompt is always passed after `--` so text starting with a hyphen (e.g.
+# --help) reaches the model instead of the CLI's option parser.
 # Validate before logging so a bad/missing arg fails fast to stderr.
 COMMAND="${1:-}"
 [[ -n "$COMMAND" && "$COMMAND" != -* ]] || usage
@@ -116,7 +118,7 @@ run_codex() {
     -c "include_collaboration_mode_instructions=false" \
     -c "project_doc_max_bytes=0" \
     -c "tool_output_token_limit=1024" \
-    "$PROMPT"
+    -- "$PROMPT"
 }
 
 run_claude() {
@@ -131,7 +133,7 @@ run_claude() {
     --model "$model" \
     --output-format text \
     --permission-mode default \
-    "$PROMPT" >"$LAST_MESSAGE_FILE"
+    -- "$PROMPT" >"$LAST_MESSAGE_FILE"
   rc=$?
   cat "$LAST_MESSAGE_FILE"
   return "$rc"

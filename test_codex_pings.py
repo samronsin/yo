@@ -223,6 +223,14 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(self.sent_prompt(), "yo")
         self.assertFalse(self.records.exists())
 
+    def test_hyphen_leading_prompts_reach_the_model_not_the_option_parser(self):
+        for backend in ("codex", "claude"):
+            run = self.yo("--no-record", "--prompt", "--help", backend=backend)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            argv = json.loads(self.argv.read_text())
+            self.argv.unlink()
+            self.assertEqual(argv[-2:], ["--", "--help"], backend)
+
 
 if __name__ == "__main__":
     unittest.main()
