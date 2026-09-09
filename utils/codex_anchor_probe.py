@@ -178,6 +178,10 @@ def ping_details(log_file, variant):
 def session_usage(session_id):
     """Token usage (incl. cached input) from the session's rollout file, if findable.
 
+    Each ping is a fresh session, so the last token_count event's cumulative
+    total covers every request the ping made (a tool call means more than one);
+    the per-request figure would only describe the final one.
+
     A wrapper may point CODEX_HOME elsewhere without telling us, so look under
     the recorder's CODEX_HOME when set and otherwise under every ~/.codex*.
     """
@@ -194,7 +198,7 @@ def session_usage(session_id):
                     payload = event.get("payload") or {}
                     if event.get("type") == "event_msg" and payload.get("type") == "token_count":
                         info = payload.get("info") or {}
-                        usage = info.get("last_token_usage") or info.get("total_token_usage") or usage
+                        usage = info.get("total_token_usage") or info.get("last_token_usage") or usage
             except OSError:
                 continue
             if usage:

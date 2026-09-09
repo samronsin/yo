@@ -112,6 +112,25 @@ class ProbeTests(ScratchCase):
         self.assertEqual(details["effective"]["prompt"], "hi")
         self.assertNotIn("usage", details)
 
+    def test_session_usage_is_the_cumulative_total_across_requests(self):
+        rollout = self.root / "sessions" / "2026" / "09" / "09" / "rollout-2026-09-09T04-30-04-abc123.jsonl"
+        rollout.parent.mkdir(parents=True)
+
+        def token_count(last, total):
+            return json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {
+                "last_token_usage": last, "total_token_usage": total}}})
+        first = {"input_tokens": 13000, "cached_input_tokens": 11000, "output_tokens": 40,
+                 "reasoning_output_tokens": 0, "total_tokens": 13040}
+        second = {"input_tokens": 13500, "cached_input_tokens": 13000, "output_tokens": 12,
+                  "reasoning_output_tokens": 0, "total_tokens": 13512}
+        total = {"input_tokens": 26500, "cached_input_tokens": 24000, "output_tokens": 52,
+                 "reasoning_output_tokens": 0, "total_tokens": 26552}
+        rollout.write_text("not json\n" + json.dumps({"type": "session_meta", "payload": {}}) + "\n"
+                           + token_count(first, first) + "\n" + token_count(second, total) + "\n")
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(self.root)}):
+            self.assertEqual(anchor.session_usage("abc123"), total)
+            self.assertIsNone(anchor.session_usage("missing"))
+
 
 class RecordTests(ScratchCase):
     def setUp(self):
