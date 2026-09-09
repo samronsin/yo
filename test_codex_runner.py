@@ -177,7 +177,6 @@ class RunTests(ScratchCase):
         self.patch(runner, "ROOT_DIR", self.root)
         self.patch(runner, "cli_version", return_value="0.153.4")
         self.patch(runner.shutil, "which", return_value="/opt/bin/wrapper")
-        self.patch(runner.sys.stdout, "isatty", return_value=False)
 
     def probe_returning(self, outcome, rc=0):
         def fake_probe(send, command):

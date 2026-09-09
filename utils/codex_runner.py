@@ -205,8 +205,6 @@ def run(args):
             append(log_file, f"[{stamp()}] yo end rc=0 (window already open, nothing sent)")
         verdict = f"[{stamp()}] {record['source']} ping: {record['outcome']}"
         append(log_file, verdict, RECORD_PREFIX + json.dumps(record, sort_keys=True))
-        if sys.stdout.isatty():  # someone is watching; cron stays quiet
-            print(verdict, flush=True)
         if record["outcome"] == "execution_error":
             return record.get("returncode") or 2
         return EXIT_CODES.get(record["outcome"], 2)
