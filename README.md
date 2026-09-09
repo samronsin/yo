@@ -32,14 +32,19 @@ the hours or commands, or `./install.py --remove claude` to stop. See
   per-command log. The command is a required first argument: a backend name
   (`codex` or `claude`) or any [custom command](#custom-commands) paired with
   `--backend`. An optional `--model` flag overrides the per-backend default
-  (GPT-5.6-terra for Codex, Haiku for Claude).
+  (GPT-5.6-terra for Codex, Haiku for Claude). With `--probe`, a Codex ping
+  is also verified against the account's quota reset and recorded (see
+  [Recorded Codex pings](#recorded-codex-pings)); `install.py` schedules
+  Codex pings that way.
 - **`install.py`** — generates and installs the crontab. Given a timezone and
   working hours, it builds a schedule that re-anchors each agent's 5h usage
   window across your day (see [Window model](#window-model)) and pipes the
   result into your crontab. The schedule is computed in your `--tz` and then
   **converted to the system time cron actually schedules against** (see
   [Timezones](#timezones)).
-- **`test_install.py`** — unit tests for the schedule helpers.
+- **`utils/codex_runner.py`** — the Codex backend `yo` execs into: owns the
+  Codex invocation and, with `--probe`, verifies and records the ping.
+- **`test_install.py`**, **`test_codex_runner.py`** — unit tests.
 
 ## Usage
 
@@ -50,6 +55,52 @@ Run once, ad hoc:
 ./yo claude                   # Claude, default model (Haiku)
 ./yo claude --model opus      # Claude with an explicit model
 ```
+
+### Recorded Codex pings
+
+Codex exposes its 5h quota reset through the CLI's token-free `app-server`,
+which makes anchoring observable: a real anchor locks `resetsAt` at ping+5h,
+while an unanchored account reports a hypothetical reset that drifts with the
+clock. `yo <codex command>` alone is the plain ping: it runs `codex exec`,
+writes the run log, and exits with the ping's status. `--probe` wraps that
+ping in the observer (`utils/codex_runner.py` with
+`utils/codex_anchor_probe.py`):
+
+1. **Pre-read.** One quota read, plus a second 15s later only if the first is
+   ambiguous (0% used with a reset near now+5h). A window that is already
+   open means nothing is sent and the run is recorded as `window_open`.
+2. **Ping.** The production invocation (`codex exec ...`, built in
+   `codex_runner.py`).
+3. **Post-reads.** After a 10s settle, two reads 60s apart decide the verdict: `anchored`,
+   `not_anchored`, or `inconclusive` (a window is live but was not opened by
+   this ping). A ping that failed is `execution_error`; one whose quota could
+   not be read afterwards is `observation_error`. A failed pre-read never
+   blocks the ping.
+4. **Record.** The per-run `yo-<command>-<timestamp>.log` is written as
+   before and now ends with a verdict line and one `record: {...}` JSON line
+   holding the effective model, effort, thread source and prompt, the CLI
+   version and executable, the quota reads, the session id and token usage
+   (including cached input tokens, read from the CLI's own session rollout),
+   the outcome, and whether the config was yo's `default` or a `manual`
+   override. Each run log is one ping's complete evidence; the series is a
+   grep over them.
+
+Exit status is `0` whenever a window is open or the run could not be judged,
+`3` when the window is verifiably still closed, and the ping's own status
+when the ping itself failed. Each run takes about 1.5 minutes longer than the
+ping alone; a per-command lock skips a run that overlaps one still being
+verified.
+
+```sh
+./yo codex                               # plain ping, about five seconds
+./yo codex --probe                       # the same ping, verified and recorded
+grep -h '^record: ' logs/yo-codex-*.log | sed 's/^record: //' | python3 -m json.tool
+```
+
+`install.py` emits `--probe` on Codex lines by default, so the block you
+confirm shows it; pass `--no-probe` to schedule plain pings instead. Claude has
+no quota window to verify against, so `--probe` is refused there and never
+scheduled.
 
 Install a schedule (review the snippet, confirm, and it's added to your crontab).
 One command per run — for several, run it once each:
@@ -179,21 +230,24 @@ another timezone), **re-run `install.py`** to re-anchor the schedule.
 ## Logs
 
 Written under `logs/` as `yo-<command>-<timestamp>.log`, with the final message
-in `yo-<command>.last.txt`.
+in `yo-<command>.last.txt`. Probed Codex runs end with a `record:` line holding
+the ping's verified outcome (see [Recorded Codex pings](#recorded-codex-pings)).
 
 ## Anchor test utilities
 
 The server-side rules for which pings anchor a 5h window shift silently (see
 issues #9 and PR #14 for the history); when pings stop anchoring, re-bisect
-rather than trusting old conclusions. Two utilities support that:
+rather than trusting old conclusions. Every recorded ping already carries its
+verdict when probed (the `record:` line in its run log), so start there. Two utilities remain for
+one-off work:
 
-- `utils/codex_anchor_probe.py [--model M] [--effort E] [--thread-source S]` — fires
-  ONE ping via `./yo codex` in an unanchored gap, then takes three account
-  rate-limit reads (via `codex app-server`, token-free): one right after the
-  ping and two more spaced `--wait` seconds apart — about 4 minutes total
-  with the 120s default. A real anchor locks `resetsAt` at ping+5h; without
-  one it drifts with query time. Change one variable per run; an ANCHORED
-  verdict closes the gap for ~5h. Refuses to run while a window is open.
+- `utils/codex_anchor_probe.py [--command WRAPPER] [--model M] [--effort E]
+  [--thread-source S] [--wait SECS] [--force]` — the observer
+  the runner uses, run as a one-shot outside the recorded history: one ping
+  through the same invocation, then two rate-limit reads `--wait` seconds apart
+  (60s default). Its verdict and evidence go to `logs/gap-anchor-test-*`.
+  Change one variable per run; an ANCHORED verdict closes the gap for ~5h.
+  Skips the ping while a window is open unless `--force`.
 - `utils/codex_anchor_watch.py [--cron-time HH:MM] [--now]` — verifies a cron ping
   anchored: reads the firing times from the installed crontab's yo-codex block
   (`--cron-time` overrides), waits for the next firing (or judges the last
@@ -208,4 +262,5 @@ Don't judge anchoring from the Codex web UI — it hides windows at 0% usage.
   VM. `cron` only runs while the machine is up, so a laptop that sleeps overnight
   will miss its scheduled pings (and the anchoring they provide).
 - The agent CLI you select (`codex` and/or `claude`) on `PATH`.
+- Python 3.10+ on `PATH` for the Codex recorder and the anchor utilities.
 - `cron` (the installer pipes into `crontab`).
