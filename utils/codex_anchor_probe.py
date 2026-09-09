@@ -82,7 +82,10 @@ def read_rate_limits(timeout: float = 30.0, command: str = "codex") -> dict:
                 if msg.get("id") == 2:
                     if "error" in msg:
                         raise RuntimeError(f"rateLimits read failed: {msg['error']}")
-                    window = five_hour_window((msg.get("result") or {}).get("rateLimits") or {})
+                    result = msg.get("result")
+                    if not isinstance(result, dict) or not isinstance(result.get("rateLimits"), dict):
+                        raise RuntimeError(f"unexpected rateLimits response: {line[:200]!r}")
+                    window = five_hour_window(result["rateLimits"])
                     reset = window.get("resetsAt")
                     if (isinstance(reset, bool) or not isinstance(reset, (int, float))
                             or not math.isfinite(reset)):
@@ -155,7 +158,8 @@ def quick_state(read):
     means nothing is open. Only the 0%-with-reset-near-now+5h case needs a
     second read to separate a fresh window from the drifting hypothetical.
     """
-    if (read.get("used_percent") or 0) > 0:
+    used = read.get("used_percent")
+    if isinstance(used, (int, float)) and used > 0:
         return "active"
     if read["resets_at"] <= read["read_at"]:
         return "idle"
@@ -208,10 +212,16 @@ def session_usage(session_id):
                         event = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    payload = event.get("payload") or {}
-                    if event.get("type") == "event_msg" and payload.get("type") == "token_count":
-                        info = payload.get("info") or {}
-                        usage = info.get("total_token_usage") or info.get("last_token_usage") or usage
+                    payload = event.get("payload")
+                    if event.get("type") != "event_msg" or not isinstance(payload, dict):
+                        continue
+                    info = payload.get("info")
+                    if payload.get("type") != "token_count" or not isinstance(info, dict):
+                        continue
+                    for key in ("total_token_usage", "last_token_usage"):  # cumulative first
+                        if isinstance(info.get(key), dict):
+                            usage = info[key]
+                            break
             except OSError:
                 continue
             if usage:
