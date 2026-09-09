@@ -4,18 +4,17 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 PROMPT="yo"
 
-usage() { echo "usage: $(basename "$0") <command> [--backend codex|claude] [--model MODEL] [--effort EFFORT] [--thread-source SOURCE] [--no-record]" >&2; exit 2; }
+usage() { echo "usage: $(basename "$0") <command> [--backend codex|claude] [--model MODEL] [--effort EFFORT] [--thread-source SOURCE]" >&2; exit 2; }
 
 # Args: required first is the CLI command to invoke. It's either a canonical
 # backend name ("codex"/"claude", e.g. `yo claude`) or any command pointing at a
 # separate auth/config context ("codex-pro", "claude-perso"). --backend selects which
-# runner flags to apply and is required unless the command is itself a backend
+# runner to apply and is required unless the command is itself a backend
 # name (then it's inferred), so the command name is free. COMMAND stays the
 # actual command invoked and the per-command log/crontab key, so several
 # coexist. Optional --model/--effort/--thread-source override the defaults
-# (codex only for the latter two) so the recorder can vary them through this
-# script instead of duplicating the codex invocation. Validate before logging
-# so a bad/missing arg fails fast to stderr.
+# (codex only for the latter two). Validate before logging so a bad/missing
+# arg fails fast to stderr.
 COMMAND="${1:-}"
 [[ -n "$COMMAND" && "$COMMAND" != -* ]] || usage
 shift
@@ -24,14 +23,12 @@ BACKEND=""
 MODEL=""
 EFFORT=""
 THREAD_SOURCE=""
-RECORD=true
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --backend)       [[ $# -ge 2 ]] || usage; BACKEND="$2"; shift 2 ;;
     --model)         [[ $# -ge 2 ]] || usage; MODEL="$2"; shift 2 ;;
     --effort)        [[ $# -ge 2 ]] || usage; EFFORT="$2"; shift 2 ;;
     --thread-source) [[ $# -ge 2 ]] || usage; THREAD_SOURCE="$2"; shift 2 ;;
-    --no-record)     RECORD=false; shift ;;
     *)               usage ;;
   esac
 done
@@ -53,69 +50,24 @@ case "$COMMAND" in
     ;;
 esac
 case "$BACKEND" in
-  codex|claude) ;;
+  codex)
+    # The Codex backend lives in Python: it owns the production invocation,
+    # verifies each ping against the account's quota reset, and ends the run
+    # log with the verdict and a `record: {...}` line (utils/codex_runner.py).
+    exec python3 "$ROOT_DIR/utils/codex_runner.py" "$COMMAND" \
+      --model "$MODEL" --effort "$EFFORT" --thread-source "$THREAD_SOURCE"
+    ;;
+  claude) ;;
   *) echo "error: --backend must be 'codex' or 'claude', got '$BACKEND'" >&2; exit 2 ;;
 esac
 
-# Every Codex ping is verified against the account's quota reset and recorded
-# at the end of its own run log as a `record: {...}` line (utils/codex_pings.py).
-# The recorder sends the actual ping by calling back here with --no-record,
-# which is also the raw path for a quick unrecorded smoke test. Claude has no
-# quota observer, so it always takes the plain path.
-if [[ "$BACKEND" == codex && "$RECORD" == true ]]; then
-  exec python3 "$ROOT_DIR/utils/codex_pings.py" "$COMMAND" \
-    --model "$MODEL" --effort "$EFFORT" --thread-source "$THREAD_SOURCE"
-fi
-
-# Logs are named per command so separate runs stay separate. The recorder
-# names the file itself (YO_LOG_FILE) so it can read the ping's details back.
+# Logs are named per command so separate runs stay separate.
 LOG_DIR="$ROOT_DIR/logs"
 LAST_MESSAGE_FILE="$LOG_DIR/yo-$COMMAND.last.txt"
 
 mkdir -p "$LOG_DIR"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-log_file="${YO_LOG_FILE:-$LOG_DIR/yo-$COMMAND-$timestamp.log}"
-
-run_codex() {
-  # Anchoring the 5h usage window is model-dependent (single-variable A/B
-  # pings in unanchored gaps, 2026-08-28/29, see PR #14): gpt-5.6-terra
-  # anchors with this plain invocation, gpt-5.4 only anchored with
-  # --thread-source scheduled (a codex >= 0.150 flag), and gpt-5.6-luna never
-  # anchors. Effort is irrelevant (mini@low anchored too), so keep medium.
-  # Default to gpt-5.6-terra — gpt-5.4's catalog upgrade target (gpt-5.4
-  # retires 2026-08-31T19:00Z), proven end-to-end by the 2026-08-29 04:30Z
-  # cron ping. Don't swap models without re-testing in an unanchored gap.
-  # Still no --ephemeral (b4ed61a: ephemeral runs only join, never anchor) and
-  # no --ignore-user-config (29b9fe7: drops ~/.codex/config.toml settings the
-  # ping needs). Non-ephemeral also persists runs to ~/.codex/sessions for
-  # auditing from cron logs. Every recorded ping now carries its own verdict
-  # (the `record:` line in its run log), so check there before trusting the above.
-  local model="${MODEL:-gpt-5.6-terra}"
-  local effort="${EFFORT:-medium}"
-  local ts_args=()
-  [[ -n "$THREAD_SOURCE" ]] && ts_args=(--thread-source "$THREAD_SOURCE")
-  # Unset --thread-source means codex's own default, "user" (verified on the
-  # wire for 0.150.x); log the effective value so bisection trails read true.
-  # The recorder parses this line, so keep its shape.
-  echo "agent=$COMMAND backend=codex model=$model reasoning_effort=$effort thread_source=${THREAD_SOURCE:-user(default)}"
-  "$COMMAND" exec \
-    ${ts_args[@]+"${ts_args[@]}"} \
-    --ignore-rules \
-    --skip-git-repo-check \
-    --sandbox read-only \
-    --color never \
-    --output-last-message "$LAST_MESSAGE_FILE" \
-    -m "$model" \
-    -c "model_reasoning_effort=\"$effort\"" \
-    -c 'model_reasoning_summary="none"' \
-    -c 'model_verbosity="low"' \
-    -c "include_environment_context=false" \
-    -c "include_apps_instructions=false" \
-    -c "include_collaboration_mode_instructions=false" \
-    -c "project_doc_max_bytes=0" \
-    -c "tool_output_token_limit=1024" \
-    "$PROMPT"
-}
+log_file="$LOG_DIR/yo-$COMMAND-$timestamp.log"
 
 run_claude() {
   local model="${MODEL:-haiku}" rc
@@ -142,10 +94,7 @@ run_claude() {
   cd "$ROOT_DIR"
 
   set +e
-  case "$BACKEND" in
-    codex)  run_codex ;;
-    claude) run_claude ;;
-  esac
+  run_claude
   rc=$?
   set -e
 

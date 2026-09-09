@@ -3,10 +3,10 @@
 
 Every `yo <codex command>` run goes through probe(): a token-free rateLimits
 read before the ping (a second one 15s later only when the first is
-ambiguous), the production ping via `./yo ... --no-record`, then after a 10s
-settle two reads 60s apart. A real anchor locks resetsAt at ping+5h; without one resetsAt is a
-hypothetical that drifts with query time. Never judge anchoring from the Codex
-web UI (it hides windows at 0% usage).
+ambiguous), the production ping (utils/codex_runner.py), then after a 10s
+settle two reads 60s apart. A real anchor locks resetsAt at ping+5h; without
+one resetsAt is a hypothetical that drifts with query time. Never judge
+anchoring from the Codex web UI (it hides windows at 0% usage).
 
 Run directly for a one-off trial outside the recorded history (see main):
 change ONE variable versus a known result, and remember an ANCHORED verdict
@@ -15,11 +15,9 @@ closes the gap for ~5h.
 
 import argparse
 import datetime
-import glob
 import json
 import math
 import os
-import re
 import select
 import subprocess
 import sys
@@ -33,7 +31,6 @@ OPEN_WINDOW_MARGIN_SECS = 90  # hypothetical window reads ~now+5h; less means re
 PRE_WAIT_SECS = 15    # second pre-read, only when one read cannot tell idle from active
 SETTLE_SECS = 10      # after the ping, before the first post-read, so a late-registering anchor reads locked
 POST_WAIT_SECS = 60   # between the two post-ping reads that decide the verdict (drift 60s vs 5s tolerance)
-DEFAULT_PROMPT = "yo"  # mirrors yo's PROMPT; recorded as evidence of what each ping sent
 OBSERVATION_ERRORS = (OSError, RuntimeError, ValueError, KeyError)
 
 
@@ -114,24 +111,6 @@ def five_hour_window(rate_limits):
     raise RuntimeError("the account reports no five-hour quota window")
 
 
-def run_ping(variant, command, log_file):
-    """Send one production ping through ./yo, writing its log to log_file.
-
-    Goes through ./yo so the codex invocation under test is exactly the cron
-    one; --no-record keeps yo from recursing back into the recorder. Only
-    explicitly requested overrides are passed, so a default probe tests yo's
-    own defaults instead of re-stating (and eventually shadowing) them here.
-    Returns (returncode, stderr).
-    """
-    cmd = [str(ROOT_DIR / "yo"), command, "--backend", "codex", "--no-record"]
-    for flag, key in (("--model", "model"), ("--effort", "effort"), ("--thread-source", "thread_source")):
-        if variant.get(key):
-            cmd += [flag, variant[key]]
-    proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                          cwd=ROOT_DIR, env={**os.environ, "YO_LOG_FILE": str(log_file)})
-    return proc.returncode, proc.stderr.strip()
-
-
 def window_state(reads):
     """Distinguish a stable active reset from a hypothetical drifting reset."""
     first, last = reads[0], reads[-1]
@@ -166,73 +145,13 @@ def quick_state(read):
     return None
 
 
-def ping_details(log_file, variant):
-    """What the ping actually ran, parsed from yo's own log of it."""
-    details = {"effective": {key: variant.get(key) or "" for key in ("model", "effort", "thread_source")}}
-    details["effective"]["prompt"] = DEFAULT_PROMPT
-    try:
-        text = Path(log_file).read_text(errors="replace")
-    except OSError:
-        return details
-    configs = re.findall(r"agent=\S+ backend=codex model=(\S+) reasoning_effort=(\S+) thread_source=(\S+)", text)
-    if configs:
-        model, effort, source = configs[-1]
-        details["effective"].update(model=model, effort=effort,
-                                    thread_source="" if source.startswith("user(") else source)
-    version = re.search(r"OpenAI Codex v(\S+)", text)
-    if version:
-        details["cli_version"] = version.group(1)
-    session = re.search(r"^session id: (\S+)", text, re.MULTILINE)
-    if session:
-        details["session_id"] = session.group(1)
-        details["usage"] = session_usage(session.group(1))
-    tokens = re.search(r"^tokens used\n([\d,]+)", text, re.MULTILINE)
-    if tokens:
-        details["tokens_used"] = int(tokens.group(1).replace(",", ""))
-    return details
-
-
-def session_usage(session_id):
-    """Token usage (incl. cached input) from the session's rollout file, if findable.
-
-    Each ping is a fresh session, so the last token_count event's cumulative
-    total covers every request the ping made (a tool call means more than one);
-    the per-request figure would only describe the final one.
-
-    A wrapper may point CODEX_HOME elsewhere without telling us, so look under
-    the recorder's CODEX_HOME when set and otherwise under every ~/.codex*.
-    """
-    roots = [os.environ["CODEX_HOME"]] if os.environ.get("CODEX_HOME") else glob.glob(os.path.expanduser("~/.codex*"))
-    for root in roots:
-        for path in glob.glob(os.path.join(root, "sessions", "**", f"rollout-*-{session_id}.jsonl"), recursive=True):
-            usage = None
-            try:
-                for line in open(path, errors="replace"):
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    payload = event.get("payload")
-                    if event.get("type") != "event_msg" or not isinstance(payload, dict):
-                        continue
-                    info = payload.get("info")
-                    if payload.get("type") != "token_count" or not isinstance(info, dict):
-                        continue
-                    for key in ("total_token_usage", "last_token_usage"):  # cumulative first
-                        if isinstance(info.get(key), dict):
-                            usage = info[key]
-                            break
-            except OSError:
-                continue
-            if usage:
-                return {k: usage.get(k) for k in ("input_tokens", "cached_input_tokens",
-                                                  "output_tokens", "reasoning_output_tokens", "total_tokens")}
-    return None
-
-
-def probe(variant, command, log_file, pre_wait=PRE_WAIT_SECS, settle=SETTLE_SECS,
+def probe(send, command, pre_wait=PRE_WAIT_SECS, settle=SETTLE_SECS,
           post_wait=POST_WAIT_SECS, force=False):
     """One verified ping: pre-read, ping, two post-reads, verdict. No retry.
+
+    `send` performs the ping and returns a dict with at least "returncode",
+    plus whatever the ping's output revealed (see codex_runner.send_ping);
+    `command` is the Codex executable or wrapper the quota reads go through.
 
     Outcomes: window_open (a window was already live, nothing sent), anchored,
     not_anchored, inconclusive (window live but not attributable to this ping),
@@ -240,8 +159,7 @@ def probe(variant, command, log_file, pre_wait=PRE_WAIT_SECS, settle=SETTLE_SECS
     but the quota could not be read afterwards). A failed pre-read never
     blocks the ping: anchoring is the point, verification is the bonus.
     """
-    result = {"variant": variant, "started_at": time.time(), "pre": [], "reads": [],
-              "outcome": "inconclusive"}
+    result = {"started_at": time.time(), "pre": [], "reads": [], "outcome": "inconclusive"}
     try:
         result["pre"].append(read_rate_limits(command=command))
         state = quick_state(result["pre"][0])
@@ -259,14 +177,10 @@ def probe(variant, command, log_file, pre_wait=PRE_WAIT_SECS, settle=SETTLE_SECS
 
     result["ping_start"] = time.time()
     try:
-        result["returncode"], stderr = run_ping(variant, command, log_file)
-        if result["returncode"] != 0 and stderr:
-            result["error"] = stderr
-    except OSError as exc:
+        result.update(send())
+    except OSError as exc:  # the executable itself could not be run
         result["returncode"], result["error"] = None, str(exc)
     result["ping_end"] = time.time()
-    result["log"] = str(log_file)
-    result.update(ping_details(log_file, variant))
 
     try:
         time.sleep(settle)
@@ -293,6 +207,10 @@ def probe(variant, command, log_file, pre_wait=PRE_WAIT_SECS, settle=SETTLE_SECS
 
 
 def main() -> int:
+    if __package__:
+        from . import codex_runner
+    else:
+        import codex_runner
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     parser.add_argument("--command", default="codex", help="Codex executable or wrapper")
     parser.add_argument("--model", default=None)
@@ -306,9 +224,12 @@ def main() -> int:
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     log_dir = ROOT_DIR / "logs"
     log_dir.mkdir(exist_ok=True)
-    variant = {name: getattr(args, name) or "" for name in ("model", "effort", "thread_source")}
-    result = probe(variant, args.command, log_dir / f"gap-anchor-test-{stamp}.log",
-                   post_wait=args.wait, force=args.force)
+    config = {name: getattr(args, name) or codex_runner.DEFAULTS[name] for name in codex_runner.DEFAULTS}
+    log_file = log_dir / f"gap-anchor-test-{stamp}.log"
+    result = probe(lambda: codex_runner.send_ping(args.command, config, log_file,
+                                                  log_dir / f"gap-anchor-test-{stamp}.last.txt"),
+                   args.command, post_wait=args.wait, force=args.force)
+    result["effective"] = {**config, "prompt": codex_runner.PROMPT}
     result_path = log_dir / f"gap-anchor-test-{stamp}.json"
     result_path.write_text(json.dumps(result, indent=2) + "\n")
     print(f"VERDICT: {result['outcome']}; evidence={result_path}")

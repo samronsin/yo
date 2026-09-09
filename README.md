@@ -41,9 +41,9 @@ the hours or commands, or `./install.py --remove claude` to stop. See
   result into your crontab. The schedule is computed in your `--tz` and then
   **converted to the system time cron actually schedules against** (see
   [Timezones](#timezones)).
-- **`utils/codex_pings.py`** — the Codex recorder `yo` execs into: verifies
-  each ping and appends one JSON line per ping.
-- **`test_install.py`**, **`test_codex_pings.py`** — unit tests.
+- **`utils/codex_runner.py`** — the Codex backend `yo` execs into: owns the
+  Codex invocation, verifies each ping, and records it in the run log.
+- **`test_install.py`**, **`test_codex_runner.py`** — unit tests.
 
 ## Usage
 
@@ -61,12 +61,13 @@ Codex exposes its 5h quota reset through the CLI's token-free `app-server`,
 which makes anchoring observable: a real anchor locks `resetsAt` at ping+5h,
 while an unanchored account reports a hypothetical reset that drifts with the
 clock. So every `yo` run on the Codex backend goes through
-`utils/codex_pings.py`:
+`utils/codex_runner.py`:
 
 1. **Pre-read.** One quota read, plus a second 15s later only if the first is
    ambiguous (0% used with a reset near now+5h). A window that is already
    open means nothing is sent and the run is recorded as `window_open`.
-2. **Ping.** The production invocation, unchanged, via `yo ... --no-record`.
+2. **Ping.** The production invocation (`codex exec ...`, built in
+   `codex_runner.py`).
 3. **Post-reads.** After a 10s settle, two reads 60s apart decide the verdict: `anchored`,
    `not_anchored`, or `inconclusive` (a window is live but was not opened by
    this ping). A ping that failed is `execution_error`; one whose quota could
@@ -89,7 +90,6 @@ verified.
 
 ```sh
 ./yo codex                               # default ping, verified and recorded
-./yo codex --no-record                   # raw ping, nothing recorded (smoke test)
 grep -h '^record: ' logs/yo-codex-*.log | sed 's/^record: //' | python3 -m json.tool
 ```
 
@@ -234,8 +234,8 @@ one-off work:
 
 - `utils/codex_anchor_probe.py [--command WRAPPER] [--model M] [--effort E]
   [--thread-source S] [--wait SECS] [--force]` — the observer
-  the recorder uses, run as a one-shot outside the recorded history: one ping
-  via `./yo ... --no-record`, then two rate-limit reads `--wait` seconds apart
+  the runner uses, run as a one-shot outside the recorded history: one ping
+  through the same invocation, then two rate-limit reads `--wait` seconds apart
   (60s default). Its verdict and evidence go to `logs/gap-anchor-test-*`.
   Change one variable per run; an ANCHORED verdict closes the gap for ~5h.
   Skips the ping while a window is open unless `--force`.

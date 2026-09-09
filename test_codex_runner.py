@@ -1,4 +1,4 @@
-"""Offline checks for recorded Codex pings: verdicts, persistence, dispatch."""
+"""Offline checks for the Codex runner: invocation, verdicts, records, dispatch."""
 import argparse
 from contextlib import contextmanager, redirect_stderr
 import fcntl
@@ -14,7 +14,7 @@ import unittest
 from unittest import mock
 
 from utils import codex_anchor_probe as anchor
-from utils import codex_pings as pings
+from utils import codex_runner as runner
 
 
 def sample(at, reset=None, used=0):
@@ -39,6 +39,20 @@ class ScratchCase(unittest.TestCase):
         patcher = mock.patch.object(target, attribute, *args, **kwargs)
         self.addCleanup(patcher.stop)
         return patcher.start()
+
+    def install_fake_cli(self):
+        """The fake Codex CLI on PATH as `wrapper`, recording its argv to a file."""
+        cli = self.root / "wrapper"
+        shutil.copy(Path(__file__).resolve().parent / "tests/fixtures/fake_codex.py", cli)
+        cli.chmod(0o755)
+        self.argv = self.root / "argv.json"
+        self.env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}", FAKE_CODEX_ARGV=str(self.argv))
+        self.env.pop("CODEX_HOME", None)
+
+    def sent_argv(self):
+        argv = json.loads(self.argv.read_text())
+        self.argv.unlink()
+        return argv
 
 
 class ProbeTests(ScratchCase):
@@ -67,6 +81,7 @@ class ProbeTests(ScratchCase):
         reads = [sample(100), sample(115)] + [sample(t, 18118) for t in (120, 300)]
         result = self.check_probe(reads, "anchored")
         self.assertEqual(result["post_state"], "active")
+        self.assertEqual(result["session_id"], "s1")  # the sender's details land in the result
         self.check_probe([sample(100), sample(115)] + [sample(t, 18000) for t in (120, 300)], "inconclusive")
 
     def test_drift_and_execution_errors_are_distinct(self):
@@ -75,6 +90,8 @@ class ProbeTests(ScratchCase):
         result = self.check_probe(reads, "execution_error", rc=7)
         self.assertEqual(result["returncode"], 7)
         self.assertEqual(result["post_state"], "idle")
+        result = self.check_probe(reads, "execution_error", send=mock.Mock(side_effect=OSError("no such file")))
+        self.assertEqual((result["returncode"], result["error"]), (None, "no such file"))
 
     def test_read_failures_never_block_the_ping(self):
         failing = RuntimeError("no app-server")
@@ -84,42 +101,54 @@ class ProbeTests(ScratchCase):
         self.assertIn("no app-server", result["read_error"])
         self.assertNotIn("post_state", result)
 
-    @contextmanager
-    def probe_doubles(self, reads, rc):
-        """Stand in for the quota reads, the ping and the clock around one probe() call."""
+    def check_probe(self, reads, outcome, calls=1, rc=0, sleeps=(15, 10, 60), send=None):
+        send = send or mock.Mock(return_value={"returncode": rc, "session_id": "s1"})
         with mock.patch.object(anchor, "read_rate_limits", side_effect=reads) as read, \
-                mock.patch.object(anchor, "run_ping", return_value=(rc, "")) as ping, \
                 mock.patch.object(anchor.time, "sleep") as sleep, \
                 mock.patch.object(anchor.time, "time", side_effect=[90, 116, 120, 400, 401]):
-            yield read, ping, sleep
-
-    def check_probe(self, reads, outcome, calls=1, rc=0, sleeps=(15, 10, 60)):
-        variant = {"model": "gpt-5.6-terra", "effort": "medium", "thread_source": ""}
-        with self.probe_doubles(reads, rc) as (read, ping, sleep):
-            result = anchor.probe(variant, "wrapper", self.root / "ping.log")
+            result = anchor.probe(send, "wrapper")
         self.assertEqual([c.args[0] for c in sleep.call_args_list], list(sleeps))
-        self.assertEqual(ping.call_count, calls)
+        self.assertEqual(send.call_count, calls)
         self.assertEqual(read.call_count, len(reads))
         self.assertTrue(all(c.kwargs == {"command": "wrapper"} for c in read.call_args_list))
         self.assertEqual(result["outcome"], outcome)
         return result
 
-    def test_ping_details_come_from_the_ping_log(self):
-        log = self.root / "yo-wrapper-x.log"
-        log.write_text("agent=wrapper backend=codex model=gpt-5.6-terra reasoning_effort=medium thread_source=user(default)\n"
-                       "OpenAI Codex v0.153.4\nsession id: 01a08697-1a0a\nuser\nyo\ncodex\nYo\ntokens used\n2,403\n")
-        usage = self.patch(anchor, "session_usage", return_value={"cached_input_tokens": 11008})
-        details = anchor.ping_details(log, {"model": "", "effort": "", "thread_source": ""})
-        usage.assert_called_once_with("01a08697-1a0a")
-        self.assertEqual(details["effective"], {"model": "gpt-5.6-terra", "effort": "medium",
-                                                "thread_source": "", "prompt": "yo"})
-        self.assertEqual((details["cli_version"], details["tokens_used"]), ("0.153.4", 2403))
-        self.assertEqual(details["usage"], {"cached_input_tokens": 11008})
-        log.write_text("agent=wrapper backend=codex model=m reasoning_effort=high thread_source=scheduled\n")
-        details = anchor.ping_details(log, {"model": "m", "effort": "high", "thread_source": "scheduled"})
-        self.assertEqual(details["effective"]["thread_source"], "scheduled")
-        self.assertEqual(details["effective"]["prompt"], "yo")
-        self.assertNotIn("usage", details)
+
+class InvocationTests(ScratchCase):
+    def test_codex_command_defaults_and_overrides(self):
+        argv = runner.codex_command("codex-pro", runner.DEFAULTS, "/tmp/last.txt")
+        self.assertEqual(argv[:2], ["codex-pro", "exec"])
+        self.assertNotIn("--thread-source", argv)
+        self.assertEqual(argv[argv.index("-m") + 1], "gpt-5.6-terra")
+        self.assertIn('model_reasoning_effort="medium"', argv)
+        self.assertEqual(argv[-1], "yo")
+        config = {"model": "gpt-5.6-luna", "effort": "high", "thread_source": "scheduled"}
+        argv = runner.codex_command("codex", config, "/tmp/last.txt")
+        self.assertEqual(argv[2:4], ["--thread-source", "scheduled"])
+        self.assertEqual(argv[argv.index("-m") + 1], "gpt-5.6-luna")
+        self.assertIn('model_reasoning_effort="high"', argv)
+
+    def test_send_ping_logs_the_run_and_reads_details_back(self):
+        self.install_fake_cli()
+        log = self.root / "run.log"
+        with mock.patch.dict(os.environ, self.env):
+            details = runner.send_ping("wrapper", runner.DEFAULTS, log, self.root / "last.txt")
+        self.assertEqual(details["returncode"], 0)
+        self.assertEqual(self.sent_argv()[-1], "yo")
+        self.assertEqual((self.root / "last.txt").read_text(), "391\n")
+        text = log.read_text()
+        self.assertIn("agent=wrapper backend=codex model=gpt-5.6-terra reasoning_effort=medium thread_source=user(default)\n", text)
+        self.assertLess(text.index("turn.completed"), text.index("yo end rc=0"))
+        with mock.patch.dict(os.environ, self.env | {"FAKE_CODEX_RC": "7"}):
+            self.assertEqual(runner.send_ping("wrapper", runner.DEFAULTS, log, self.root / "last.txt")["returncode"], 7)
+        self.assertIn("yo end rc=7", log.read_text())
+
+    def test_parse_output_takes_version_session_and_tokens(self):
+        details = runner.parse_output("Reading additional input from stdin...\nOpenAI Codex v0.153.4\n--------\n"
+                                      "session id: 01a08697-1a0a\n--------\nuser\nyo\ncodex\nYo\ntokens used\n2,403\nYo\n")
+        self.assertEqual(details, {"cli_version": "0.153.4", "session_id": "01a08697-1a0a", "tokens_used": 2403})
+        self.assertEqual(runner.parse_output('{"type": "turn.completed"}\n'), {})
 
     def test_session_usage_is_the_cumulative_total_across_requests(self):
         rollout = self.root / "sessions" / "2026" / "09" / "09" / "rollout-2026-09-09T04-30-04-abc123.jsonl"
@@ -134,59 +163,65 @@ class ProbeTests(ScratchCase):
                   "reasoning_output_tokens": 0, "total_tokens": 13512}
         total = {"input_tokens": 26500, "cached_input_tokens": 24000, "output_tokens": 52,
                  "reasoning_output_tokens": 0, "total_tokens": 26552}
-        rollout.write_text("not json\n" + json.dumps({"type": "session_meta", "payload": {}}) + "\n"
+        rollout.write_text("not json\n" + json.dumps({"type": "session_meta", "payload": None}) + "\n"
                            + token_count(first, first) + "\n" + token_count(second, total) + "\n")
         with mock.patch.dict(os.environ, {"CODEX_HOME": str(self.root)}):
-            self.assertEqual(anchor.session_usage("abc123"), total)
-            self.assertIsNone(anchor.session_usage("missing"))
+            self.assertEqual(runner.session_usage("abc123"), total)
+            self.assertIsNone(runner.session_usage("missing"))
 
 
-class RecordTests(ScratchCase):
+class RunTests(ScratchCase):
     def setUp(self):
         super().setUp()
         self.log_dir = self.root / "logs"
-        self.patch(pings, "ROOT_DIR", self.root)
-        self.patch(pings, "cli_version", return_value="0.153.4")
-        self.patch(pings.shutil, "which", return_value="/opt/bin/wrapper")
-        self.patch(pings.sys.stdout, "isatty", return_value=False)
+        self.patch(runner, "ROOT_DIR", self.root)
+        self.patch(runner, "cli_version", return_value="0.153.4")
+        self.patch(runner.shutil, "which", return_value="/opt/bin/wrapper")
+        self.patch(runner.sys.stdout, "isatty", return_value=False)
 
     def probe_returning(self, outcome, rc=0):
-        def fake_probe(variant, command, log_file):
+        def fake_probe(send, command):
             self.assertEqual(command, "wrapper")
-            self.assertRegex(str(log_file), r"logs/yo-wrapper-\d{8}T\d{6}Z(-\d+)?\.log$")
-            return {"variant": variant, "outcome": outcome, "returncode": rc, "started_at": time.time()}
-        return mock.patch.object(pings, "probe", side_effect=fake_probe)
+            return {"outcome": outcome, "returncode": rc, "started_at": time.time()}
+        return mock.patch.object(runner, "probe", side_effect=fake_probe)
 
     def records(self):
-        return pings.load_records("wrapper", self.log_dir)
+        return runner.load_records("wrapper", self.log_dir)
 
-    def test_each_run_appends_one_line_with_identity_and_exit_codes(self):
-        with self.probe_returning("anchored") as probe:
-            self.assertEqual(pings.run(args_for()), 0)
-        self.assertEqual(probe.call_args.args[0], {"model": "", "effort": "", "thread_source": ""})
+    def test_each_run_writes_one_log_with_identity_verdict_record_and_exit_code(self):
+        with self.probe_returning("anchored"):
+            self.assertEqual(runner.run(args_for()), 0)
         (record,) = self.records()
         self.assertEqual({k: record[k] for k in ("schema", "command", "executable", "cli_version", "source", "outcome")},
                          {"schema": 1, "command": "wrapper", "executable": "/opt/bin/wrapper",
                           "cli_version": "0.153.4", "source": "default", "outcome": "anchored"})
+        self.assertEqual(record["effective"], {**runner.DEFAULTS, "prompt": "yo"})
+        (log,) = runner.run_logs("wrapper", self.log_dir)
+        lines = log.read_text().splitlines()
+        self.assertIn("yo start", lines[0])
+        self.assertIn("default ping: anchored", lines[-2])
+        self.assertTrue(lines[-1].startswith("record: "))
         for outcome, rc, expected in (("not_anchored", 0, 3), ("window_open", 0, 0), ("inconclusive", 0, 0),
                                       ("observation_error", 0, 0), ("execution_error", 7, 7)):
             with self.probe_returning(outcome, rc):
-                self.assertEqual(pings.run(args_for(model="gpt-5.6-luna")), expected)
+                self.assertEqual(runner.run(args_for(model="gpt-5.6-luna")), expected)
             self.assertEqual(self.records()[-1]["source"], "manual")
+            self.assertEqual(self.records()[-1]["effective"]["model"], "gpt-5.6-luna")
         self.assertEqual(len(self.records()), 6)
+        self.assertEqual(len(runner.run_logs("wrapper", self.log_dir)), 6)  # same-second runs never share a log
 
     def test_concurrent_run_is_skipped_and_other_backends_are_refused(self):
         self.log_dir.mkdir(parents=True)
         with (self.log_dir / "yo-wrapper.lock").open("a") as held:
             fcntl.flock(held, fcntl.LOCK_EX)
             with self.probe_returning("anchored") as probe, redirect_stderr(io.StringIO()) as err:
-                self.assertEqual(pings.run(args_for()), 0)
+                self.assertEqual(runner.run(args_for()), 0)
         probe.assert_not_called()
         self.assertIn("skipped", err.getvalue())
         self.assertEqual(self.records(), [])
         with self.probe_returning("anchored") as probe:
-            with self.assertRaisesRegex(ValueError, "only supported with the codex backend"):
-                pings.run(args_for(backend="claude"))
+            with self.assertRaisesRegex(ValueError, "only runs the codex backend"):
+                runner.run(args_for(backend="claude"))
         probe.assert_not_called()
 
 
@@ -196,64 +231,47 @@ class DispatchTests(ScratchCase):
         source = Path(__file__).resolve().parent
         shutil.copy(source / "yo", self.root / "yo")
         shutil.copytree(source / "utils", self.root / "utils", ignore=shutil.ignore_patterns("__pycache__"))
-        cli = self.root / "wrapper"
-        shutil.copy(source / "tests/fixtures/fake_codex.py", cli)
-        cli.chmod(0o755)
-        self.argv = self.root / "argv.json"
-        self.env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}", FAKE_CODEX_ARGV=str(self.argv))
-        self.env.pop("CODEX_HOME", None)
+        self.install_fake_cli()
         self.log_dir = self.root / "logs"
 
     def yo(self, *args, env=None, backend="codex"):
         return subprocess.run([str(self.root / "yo"), "wrapper", "--backend", backend, *args],
                               env=env or self.env, capture_output=True, text=True, timeout=30)
 
-    def sent_prompt(self):
-        prompt = json.loads(self.argv.read_text())[-1]
-        self.argv.unlink()
-        return prompt
-
-    def loaded(self):
-        return pings.load_records("wrapper", self.log_dir)
-
-    def test_a_codex_ping_flows_through_the_recorder_and_back_into_its_log(self):
-        # One real recorded ping (it pays the post-ping settle); the mocked
-        # RecordTests cover the other outcomes and exit codes.
+    def test_a_codex_ping_is_verified_and_recorded_in_its_run_log(self):
+        # One real recorded ping (it pays the post-ping settle); RunTests cover the other outcomes.
         run = self.yo("--model", "gpt-5.6-luna", "--thread-source", "scheduled")
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(run.stdout, "")  # cron stays quiet; the verdict lives in the logs
-        self.assertEqual(self.sent_prompt(), "yo")
-        (record,) = self.loaded()
+        self.assertEqual(run.stdout, "")  # cron stays quiet; the verdict lives in the log
+        argv = self.sent_argv()
+        self.assertEqual((argv[-1], argv[argv.index("-m") + 1], argv[argv.index("--thread-source") + 1]),
+                         ("yo", "gpt-5.6-luna", "scheduled"))
+        (record,) = runner.load_records("wrapper", self.log_dir)
         self.assertEqual((record["source"], record["outcome"], record["cli_version"], record["returncode"]),
                          ("manual", "observation_error", "codex-cli test-version", 0))
         self.assertEqual(record["effective"],
                          {"model": "gpt-5.6-luna", "effort": "medium", "thread_source": "scheduled", "prompt": "yo"})
         self.assertIn("fixture has no quota api", record["read_error"])
-        (ping_log,) = pings.run_logs("wrapper", self.log_dir)
-        self.assertEqual(ping_log.resolve(), Path(record["log"]).resolve())
-        text = ping_log.read_text()
-        self.assertIn("agent=wrapper backend=codex model=gpt-5.6-luna reasoning_effort=medium thread_source=scheduled", text)
-        self.assertLess(text.index("yo end rc=0"), text.index("manual ping: observation_error"))
+        (log,) = runner.run_logs("wrapper", self.log_dir)
+        text = log.read_text()
+        for earlier, later in (("yo start", "agent=wrapper backend=codex model=gpt-5.6-luna"),
+                               ("agent=wrapper", "yo end rc=0"), ("yo end rc=0", "manual ping: observation_error")):
+            self.assertLess(text.index(earlier), text.index(later))
         self.assertTrue(text.rstrip().splitlines()[-1].startswith("record: "))
 
-    def test_open_window_sends_nothing_and_no_record_is_raw(self):
+    def test_open_window_sends_nothing_and_claude_stays_plain(self):
         open_window = json.dumps({"usedPercent": 12, "windowDurationMins": 300, "resetsAt": time.time() + 7200})
         skipped = self.yo(env=self.env | {"FAKE_CODEX_QUOTA": open_window})
         self.assertEqual(skipped.returncode, 0, skipped.stderr)
         self.assertFalse(self.argv.exists())
-        self.assertEqual([r["outcome"] for r in self.loaded()], ["window_open"])
+        (record,) = runner.load_records("wrapper", self.log_dir)
+        self.assertEqual(record["outcome"], "window_open")
+        self.assertIn("yo end rc=0 (window already open", runner.run_logs("wrapper", self.log_dir)[0].read_text())
 
-        raw = self.yo("--no-record")
-        self.assertEqual(raw.returncode, 0, raw.stderr)
-        self.assertEqual(self.sent_prompt(), "yo")
-        self.assertEqual(len(self.loaded()), 1)
-
-    def test_claude_stays_plain(self):
         plain = self.yo(backend="claude")
         self.assertEqual(plain.returncode, 0, plain.stderr)
-        self.assertEqual(self.sent_prompt(), "yo")
-        self.assertEqual(self.loaded(), [])
-        self.assertEqual(len(pings.run_logs("wrapper", self.log_dir)), 1)  # the plain run log, no record
+        self.assertEqual(self.sent_argv()[-1], "yo")
+        self.assertEqual(len(runner.load_records("wrapper", self.log_dir)), 1)  # a plain run log, no record
 
 
 if __name__ == "__main__":
