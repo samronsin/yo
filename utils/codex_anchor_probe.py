@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
-"""One-shot probe for 5h-window anchoring: does this variant anchor?
+"""Codex 5h-window observer: did this ping anchor a window?
 
-Fires a single ping for the given (model, effort, thread_source) variant via
-`./yo codex` — so the codex invocation under test is exactly the production
-one — then two spaced rateLimits reads decide the verdict: a real anchor
-locks resetsAt at ping+5h, while without one resetsAt is a hypothetical that
-drifts with query time. Never judge anchoring from the Codex web UI (it
-hides windows at 0% usage).
+Every `yo <codex command>` run goes through probe(): a token-free rateLimits
+read before the ping (a second one 15s later only when the first is
+ambiguous), the production ping via `./yo ... --no-record`, then two reads
+180s apart. A real anchor locks resetsAt at ping+5h; without one resetsAt is a
+hypothetical that drifts with query time. Never judge anchoring from the Codex
+web UI (it hides windows at 0% usage).
 
-Bisection etiquette (see PR #14 for a worked example): test in an unanchored
-gap, change ONE variable versus a known result, and remember an ANCHORED
-verdict closes the gap for ~5h. Refuses to run while a window is open.
+Run directly for a one-off trial outside the recorded history (see main):
+change ONE variable versus a known result, and remember an ANCHORED verdict
+closes the gap for ~5h.
 """
 
 import argparse
 import datetime
+import glob
 import json
+import math
 import os
+import re
 import select
 import subprocess
 import sys
@@ -27,6 +30,10 @@ ROOT_DIR = Path(__file__).resolve().parent.parent  # repo root
 WINDOW_SECS = 5 * 3600
 DRIFT_TOLERANCE_SECS = 5   # locked resetsAt jitters by ~2s server-side
 OPEN_WINDOW_MARGIN_SECS = 90  # hypothetical window reads ~now+5h; less means real
+PRE_WAIT_SECS = 15    # second pre-read, only when one read cannot tell idle from active
+POST_WAIT_SECS = 180  # between the two post-ping reads that decide the verdict
+DEFAULT_PROMPT = "yo"  # mirrors yo's PROMPT default; the recorder needs the effective value
+OBSERVATION_ERRORS = (OSError, RuntimeError, ValueError, KeyError)
 
 
 def utc(ts: float) -> str:
@@ -35,10 +42,10 @@ def utc(ts: float) -> str:
     )
 
 
-def read_rate_limits(timeout: float = 30.0) -> dict:
+def read_rate_limits(timeout: float = 30.0, command: str = "codex") -> dict:
     """Read account rate limits via `codex app-server` (spends no tokens)."""
     proc = subprocess.Popen(
-        ["codex", "app-server"],
+        [command, "app-server"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -54,11 +61,11 @@ def read_rate_limits(timeout: float = 30.0) -> dict:
         # select + os.read, never a bare readline(): a stalled app-server that
         # writes no newline would block readline() forever and the deadline
         # below would never be checked again.
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
         fd = proc.stdout.fileno()
         buf = b""
         while True:
-            remaining = deadline - time.time()
+            remaining = deadline - time.monotonic()
             if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
                 raise RuntimeError(f"no rateLimits response within {timeout:.0f}s")
             chunk = os.read(fd, 65536)
@@ -72,119 +79,212 @@ def read_rate_limits(timeout: float = 30.0) -> dict:
                 except json.JSONDecodeError:
                     continue
                 if msg.get("id") == 2:
-                    primary = msg["result"]["rateLimits"]["primary"]
+                    if "error" in msg:
+                        raise RuntimeError(f"rateLimits read failed: {msg['error']}")
+                    primary = (msg.get("result") or {}).get("rateLimits", {}).get("primary")
+                    if not primary or primary.get("windowDurationMins") != 300:
+                        raise RuntimeError("no supported primary five-hour quota window")
+                    reset = primary.get("resetsAt")
+                    if (isinstance(reset, bool) or not isinstance(reset, (int, float))
+                            or not math.isfinite(reset)):
+                        raise RuntimeError("missing or invalid quota reset timestamp")
                     return {"read_at": time.time(), "resets_at": primary["resetsAt"],
                             "used_percent": primary.get("usedPercent")}
     finally:
         proc.kill()
+        proc.wait()
+        proc.stdin.close()
+        proc.stdout.close()
 
 
-def run_ping(model: str | None, effort: str | None,
-             thread_source: str | None, log_path: Path) -> int:
-    # Go through ./yo so the invocation under test is the production one; the
-    # ping's own output lands in logs/yo-codex-*.log like any cron run. Only
-    # pass overrides that were explicitly requested, so a no-arg probe tests
-    # exactly yo's defaults rather than re-stating (and eventually shadowing)
-    # them here.
-    cmd = [str(ROOT_DIR / "yo"), "codex"]
-    if model:
-        cmd += ["--model", model]
-    if effort:
-        cmd += ["--effort", effort]
-    if thread_source:
-        cmd += ["--thread-source", thread_source]
-    with open(log_path, "a") as log:
-        log.write(f"+ {' '.join(cmd)}\n")
-        log.flush()
-        proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=log,
-                              stderr=subprocess.STDOUT, cwd=ROOT_DIR)
-    return proc.returncode
+def run_ping(variant, command, log_file):
+    """Send one production ping through ./yo, writing its log to log_file.
+
+    Goes through ./yo so the codex invocation under test is exactly the cron
+    one; --no-record keeps yo from recursing back into the recorder. Only
+    explicitly requested overrides are passed, so a default probe tests yo's
+    own defaults instead of re-stating (and eventually shadowing) them here.
+    Returns (returncode, stderr).
+    """
+    cmd = [str(ROOT_DIR / "yo"), command, "--backend", "codex", "--no-record"]
+    for flag, key in (("--model", "model"), ("--effort", "effort"),
+                      ("--thread-source", "thread_source"), ("--prompt", "prompt")):
+        if variant.get(key):
+            cmd += [flag, variant[key]]
+    proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                          cwd=ROOT_DIR, env={**os.environ, "YO_LOG_FILE": str(log_file)})
+    return proc.returncode, proc.stderr.strip()
+
+
+def window_state(reads):
+    """Distinguish a stable active reset from a hypothetical drifting reset."""
+    first, last = reads[0], reads[-1]
+    elapsed = last["read_at"] - first["read_at"]
+    drift = last["resets_at"] - first["resets_at"]
+    if elapsed < 2 * DRIFT_TOLERANCE_SECS:
+        return "unknown"
+    if all(r["resets_at"] <= r["read_at"] for r in reads):
+        return "idle"
+    if (max(r["resets_at"] for r in reads) - min(r["resets_at"] for r in reads)
+            <= DRIFT_TOLERANCE_SECS and last["resets_at"] > last["read_at"]):
+        return "active"
+    if (abs(drift - elapsed) <= DRIFT_TOLERANCE_SECS
+            and all(abs(r["resets_at"] - r["read_at"] - WINDOW_SECS)
+                    <= OPEN_WINDOW_MARGIN_SECS for r in reads)):
+        return "idle"
+    return "unknown"
+
+
+def quick_state(read):
+    """Window state from a single read when it is unambiguous, else None.
+
+    Usage above 0% only exists inside a live window, and a reset in the past
+    means nothing is open. Only the 0%-with-reset-near-now+5h case needs a
+    second read to separate a fresh window from the drifting hypothetical.
+    """
+    if (read.get("used_percent") or 0) > 0:
+        return "active"
+    if read["resets_at"] <= read["read_at"]:
+        return "idle"
+    return None
+
+
+def ping_details(log_file, variant):
+    """What the ping actually ran, parsed from yo's own log of it."""
+    details = {"effective": {key: variant.get(key) or "" for key in ("model", "effort", "thread_source")}}
+    details["effective"]["prompt"] = variant.get("prompt") or DEFAULT_PROMPT
+    try:
+        text = Path(log_file).read_text(errors="replace")
+    except OSError:
+        return details
+    configs = re.findall(r"agent=\S+ backend=codex model=(\S+) reasoning_effort=(\S+) thread_source=(\S+)", text)
+    if configs:
+        model, effort, source = configs[-1]
+        details["effective"].update(model=model, effort=effort,
+                                    thread_source="" if source.startswith("user(") else source)
+    version = re.search(r"OpenAI Codex v(\S+)", text)
+    if version:
+        details["cli_version"] = version.group(1)
+    session = re.search(r"^session id: (\S+)", text, re.MULTILINE)
+    if session:
+        details["session_id"] = session.group(1)
+        details["usage"] = session_usage(session.group(1))
+    tokens = re.search(r"^tokens used\n([\d,]+)", text, re.MULTILINE)
+    if tokens:
+        details["tokens_used"] = int(tokens.group(1).replace(",", ""))
+    return details
+
+
+def session_usage(session_id):
+    """Token usage (incl. cached input) from the session's rollout file, if findable.
+
+    A wrapper may point CODEX_HOME elsewhere without telling us, so look under
+    the recorder's CODEX_HOME when set and otherwise under every ~/.codex*.
+    """
+    roots = [os.environ["CODEX_HOME"]] if os.environ.get("CODEX_HOME") else glob.glob(os.path.expanduser("~/.codex*"))
+    for root in roots:
+        for path in glob.glob(os.path.join(root, "sessions", "**", f"rollout-*-{session_id}.jsonl"), recursive=True):
+            usage = None
+            try:
+                for line in open(path, errors="replace"):
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    payload = event.get("payload") or {}
+                    if event.get("type") == "event_msg" and payload.get("type") == "token_count":
+                        info = payload.get("info") or {}
+                        usage = info.get("last_token_usage") or info.get("total_token_usage") or usage
+            except OSError:
+                continue
+            if usage:
+                return {k: usage.get(k) for k in ("input_tokens", "cached_input_tokens",
+                                                  "output_tokens", "reasoning_output_tokens", "total_tokens")}
+    return None
+
+
+def probe(variant, command, log_file, pre_wait=PRE_WAIT_SECS, post_wait=POST_WAIT_SECS, force=False):
+    """One verified ping: pre-read, ping, two post-reads, verdict. No retry.
+
+    Outcomes: window_open (a window was already live, nothing sent), anchored,
+    not_anchored, inconclusive (window live but not attributable to this ping),
+    execution_error (the ping itself failed), observation_error (the ping ran
+    but the quota could not be read afterwards). A failed pre-read never
+    blocks the ping: anchoring is the point, verification is the bonus.
+    """
+    result = {"variant": variant, "started_at": time.time(), "pre": [], "reads": [],
+              "outcome": "inconclusive"}
+    try:
+        result["pre"].append(read_rate_limits(command=command))
+        state = quick_state(result["pre"][0])
+        if state is None:
+            time.sleep(pre_wait)
+            result["pre"].append(read_rate_limits(command=command))
+            state = window_state(result["pre"])
+    except OBSERVATION_ERRORS as exc:
+        state = "unknown"
+        result["read_error"] = str(exc)
+    result["pre_state"] = state
+    if state == "active" and not force:
+        result.update(outcome="window_open", finished_at=time.time())
+        return result
+
+    result["ping_start"] = time.time()
+    try:
+        result["returncode"], stderr = run_ping(variant, command, log_file)
+        if result["returncode"] != 0 and stderr:
+            result["error"] = stderr
+    except OSError as exc:
+        result["returncode"], result["error"] = None, str(exc)
+    result["ping_end"] = time.time()
+    result["log"] = str(log_file)
+    result.update(ping_details(log_file, variant))
+
+    try:
+        for i in range(2):
+            if i:
+                time.sleep(post_wait)
+            result["reads"].append(read_rate_limits(command=command))
+    except OBSERVATION_ERRORS as exc:
+        result["read_error"] = str(exc)
+    if len(result["reads"]) == 2:
+        result["post_state"] = window_state(result["reads"])
+    if result["returncode"] != 0:
+        result["outcome"] = "execution_error"
+    elif len(result["reads"]) < 2:
+        result["outcome"] = "observation_error"
+    elif result["post_state"] == "idle":
+        result["outcome"] = "not_anchored"
+    elif result["post_state"] == "active":
+        anchor = result["reads"][-1]["resets_at"] - WINDOW_SECS
+        if result["ping_start"] - DRIFT_TOLERANCE_SECS <= anchor <= result["ping_end"] + DRIFT_TOLERANCE_SECS:
+            result["outcome"] = "anchored"
+    result["finished_at"] = time.time()
+    return result
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--model", default=None,
-                        help="override; omitted = yo's default model")
-    parser.add_argument("--effort", default=None,
-                        choices=["low", "medium", "high"],
-                        help="override; omitted = yo's default effort")
-    parser.add_argument("--thread-source", default=None,
-                        help='e.g. "scheduled"; omitted = codex default ("user")')
-    parser.add_argument("--wait", type=int, default=120,
-                        help="seconds between the two verdict reads")
-    parser.add_argument("--force", action="store_true",
-                        help="skip the open-window pre-check")
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
+    parser.add_argument("--command", default="codex", help="Codex executable or wrapper")
+    parser.add_argument("--prompt", default=None)
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--effort", choices=["low", "medium", "high"], default=None)
+    parser.add_argument("--thread-source", default=None)
+    parser.add_argument("--wait", type=int, default=POST_WAIT_SECS, help="seconds between verdict reads")
+    parser.add_argument("--force", action="store_true", help="send even if a window is open (verdict inconclusive)")
     args = parser.parse_args()
-
-    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    if args.wait < 2 * DRIFT_TOLERANCE_SECS:
+        parser.error(f"--wait must be at least {2 * DRIFT_TOLERANCE_SECS} seconds to distinguish drift")
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     log_dir = ROOT_DIR / "logs"
     log_dir.mkdir(exist_ok=True)
-    log_path = log_dir / f"gap-anchor-test-{stamp}.log"
+    variant = {name: getattr(args, name) or "" for name in ("model", "effort", "thread_source", "prompt")}
+    result = probe(variant, args.command, log_dir / f"gap-anchor-test-{stamp}.log",
+                   post_wait=args.wait, force=args.force)
     result_path = log_dir / f"gap-anchor-test-{stamp}.json"
-
-    def say(msg: str) -> None:
-        line = f"[{utc(time.time())}] {msg}"
-        print(line, flush=True)
-        with open(log_path, "a") as log:
-            log.write(line + "\n")
-
-    variant = (f"model={args.model or 'yo default'} "
-               f"effort={args.effort or 'yo default'} "
-               f"thread_source={args.thread_source or 'user (default)'}")
-    say(f"variant under test: {variant}")
-
-    pre = read_rate_limits()
-    hypothetical_gap = pre["read_at"] + WINDOW_SECS - pre["resets_at"]
-    say(f"pre-check: resetsAt={utc(pre['resets_at'])} used%={pre['used_percent']} "
-        f"(now+5h - resetsAt = {hypothetical_gap:.0f}s)")
-    window_open = pre["resets_at"] > pre["read_at"] and hypothetical_gap > OPEN_WINDOW_MARGIN_SECS
-    if window_open and not args.force:
-        say(f"ABORT: a window is already open (expires {utc(pre['resets_at'])}); "
-            "a ping now would join it and prove nothing. Re-run after expiry.")
-        return 1
-
-    ping_start = time.time()
-    say("sending ping...")
-    rc = run_ping(args.model, args.effort, args.thread_source, log_path)
-    say(f"ping rc={rc} (output in {log_path.name})")
-    if rc != 0:
-        say("ABORT: ping failed; no verdict.")
-        return 1
-
-    reads = [read_rate_limits()]
-    say(f"read #1: resetsAt={utc(reads[0]['resets_at'])} "
-        "(anchor and hypothetical both read ~ping+5h here; waiting...)")
-    for i in (2, 3):
-        time.sleep(args.wait)
-        reads.append(read_rate_limits())
-        say(f"read #{i}: resetsAt={utc(reads[-1]['resets_at'])} used%={reads[-1]['used_percent']}")
-
-    drift = reads[-1]["resets_at"] - reads[0]["resets_at"]
-    elapsed = reads[-1]["read_at"] - reads[0]["read_at"]
-    anchored = abs(drift) <= DRIFT_TOLERANCE_SECS
-    anchor_delta = reads[0]["resets_at"] - WINDOW_SECS - ping_start
-
-    say(f"drift over {elapsed:.0f}s: {drift:+d}s "
-        f"(anchor would be ping{anchor_delta:+.0f}s)")
-    if anchored:
-        say(f"VERDICT: ANCHORED — resetsAt locked at {utc(reads[-1]['resets_at'])} "
-            f"({variant}).")
-        say("note: this success closed the gap for ~5h.")
-    else:
-        say(f"VERDICT: NOT ANCHORED — resetsAt drifts with query time ({variant}); "
-            "change one variable and re-test (the gap is still open).")
-
-    result_path.write_text(json.dumps({
-        "variant": {"model": args.model, "effort": args.effort,
-                    "thread_source": args.thread_source},
-        "ping_start": ping_start,
-        "pre": pre,
-        "reads": reads,
-        "drift_secs": drift,
-        "anchored": anchored,
-    }, indent=2) + "\n")
-    say(f"result written to {result_path.name}")
-    return 0
+    result_path.write_text(json.dumps(result, indent=2) + "\n")
+    print(f"VERDICT: {result['outcome']}; evidence={result_path}")
+    return {"anchored": 0, "window_open": 1, "not_anchored": 3}.get(result["outcome"], 2)
 
 
 if __name__ == "__main__":

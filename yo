@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 PROMPT="yo"
 
-usage() { echo "usage: $(basename "$0") <command> [--backend codex|claude] [--model MODEL] [--effort EFFORT] [--thread-source SOURCE]" >&2; exit 2; }
+usage() { echo "usage: $(basename "$0") <command> [--backend codex|claude] [--model MODEL] [--effort EFFORT] [--thread-source SOURCE] [--prompt TEXT] [--no-record]" >&2; exit 2; }
 
 # Args: required first is the CLI command to invoke. It's either a canonical
 # backend name ("codex"/"claude", e.g. `yo claude`) or any command pointing at a
@@ -12,10 +12,10 @@ usage() { echo "usage: $(basename "$0") <command> [--backend codex|claude] [--mo
 # runner flags to apply and is required unless the command is itself a backend
 # name (then it's inferred), so the command name is free. COMMAND stays the
 # actual command invoked and the per-command log/crontab key, so several
-# coexist. Optional --model/--effort/--thread-source override the defaults (codex
-# only for the latter two) so utils/codex_anchor_probe.py can vary them through
-# this script instead of duplicating the codex invocation. Validate before
-# logging so a bad/missing arg fails fast to stderr.
+# coexist. Optional --model/--effort/--thread-source/--prompt override the
+# defaults (codex only for effort and thread source) so the recorder can vary
+# them through this script instead of duplicating the codex invocation.
+# Validate before logging so a bad/missing arg fails fast to stderr.
 COMMAND="${1:-}"
 [[ -n "$COMMAND" && "$COMMAND" != -* ]] || usage
 shift
@@ -24,12 +24,16 @@ BACKEND=""
 MODEL=""
 EFFORT=""
 THREAD_SOURCE=""
+PROMPT_ARG=""
+NO_RECORD=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --backend)       [[ $# -ge 2 ]] || usage; BACKEND="$2"; shift 2 ;;
     --model)         [[ $# -ge 2 ]] || usage; MODEL="$2"; shift 2 ;;
     --effort)        [[ $# -ge 2 ]] || usage; EFFORT="$2"; shift 2 ;;
     --thread-source) [[ $# -ge 2 ]] || usage; THREAD_SOURCE="$2"; shift 2 ;;
+    --prompt)        [[ $# -ge 2 ]] || usage; PROMPT="$2"; PROMPT_ARG="$2"; shift 2 ;;
+    --no-record)     NO_RECORD=true; shift ;;
     *)               usage ;;
   esac
 done
@@ -55,13 +59,24 @@ case "$BACKEND" in
   *) echo "error: --backend must be 'codex' or 'claude', got '$BACKEND'" >&2; exit 2 ;;
 esac
 
-# Logs are named per command so separate runs stay separate.
+# Every Codex ping is verified against the account's quota reset and recorded
+# as one JSON line in logs/yo-<command>.pings.jsonl (utils/codex_pings.py).
+# The recorder sends the actual ping by calling back here with --no-record,
+# which is also the raw path for a quick unrecorded smoke test. Claude has no
+# quota observer, so it always takes the plain path.
+if [[ "$BACKEND" == codex && "$NO_RECORD" != true ]]; then
+  exec python3 "$ROOT_DIR/utils/codex_pings.py" "$COMMAND" \
+    --model "$MODEL" --effort "$EFFORT" --thread-source "$THREAD_SOURCE" --prompt="$PROMPT_ARG"
+fi
+
+# Logs are named per command so separate runs stay separate. The recorder
+# names the file itself (YO_LOG_FILE) so it can read the ping's details back.
 LOG_DIR="$ROOT_DIR/logs"
 LAST_MESSAGE_FILE="$LOG_DIR/yo-$COMMAND.last.txt"
 
 mkdir -p "$LOG_DIR"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-log_file="$LOG_DIR/yo-$COMMAND-$timestamp.log"
+log_file="${YO_LOG_FILE:-$LOG_DIR/yo-$COMMAND-$timestamp.log}"
 
 run_codex() {
   # Anchoring the 5h usage window is model-dependent (single-variable A/B
@@ -75,16 +90,18 @@ run_codex() {
   # Still no --ephemeral (b4ed61a: ephemeral runs only join, never anchor) and
   # no --ignore-user-config (29b9fe7: drops ~/.codex/config.toml settings the
   # ping needs). Non-ephemeral also persists runs to ~/.codex/sessions for
-  # auditing from cron logs.
+  # auditing from cron logs. Every recorded ping now carries its own verdict
+  # (logs/yo-<command>.pings.jsonl), so check there before trusting the above.
   local model="${MODEL:-gpt-5.6-terra}"
   local effort="${EFFORT:-medium}"
   local ts_args=()
   [[ -n "$THREAD_SOURCE" ]] && ts_args=(--thread-source "$THREAD_SOURCE")
   # Unset --thread-source means codex's own default, "user" (verified on the
   # wire for 0.150.x); log the effective value so bisection trails read true.
+  # The recorder parses this line, so keep its shape.
   echo "agent=$COMMAND backend=codex model=$model reasoning_effort=$effort thread_source=${THREAD_SOURCE:-user(default)}"
   "$COMMAND" exec \
-    "${ts_args[@]}" \
+    ${ts_args[@]+"${ts_args[@]}"} \
     --ignore-rules \
     --skip-git-repo-check \
     --sandbox read-only \
