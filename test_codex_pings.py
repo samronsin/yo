@@ -191,7 +191,8 @@ class DispatchTests(ScratchCase):
         shutil.copy(source / "tests/fixtures/fake_codex.py", cli)
         cli.chmod(0o755)
         self.argv = self.root / "argv.json"
-        self.env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}", FAKE_CODEX_ARGV=str(self.argv))
+        self.env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}", FAKE_CODEX_ARGV=str(self.argv),
+                        YO_PROBE_SETTLE_SECS="0")
         self.env.pop("CODEX_HOME", None)
         self.log_dir = self.root / "logs"
 

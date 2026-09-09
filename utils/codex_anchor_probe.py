@@ -31,8 +31,10 @@ WINDOW_SECS = 5 * 3600
 DRIFT_TOLERANCE_SECS = 5   # locked resetsAt jitters by ~2s server-side
 OPEN_WINDOW_MARGIN_SECS = 90  # hypothetical window reads ~now+5h; less means real
 PRE_WAIT_SECS = 15    # second pre-read, only when one read cannot tell idle from active
-SETTLE_SECS = 10      # after the ping, before the first post-read, so a late-registering anchor reads locked
-POST_WAIT_SECS = 60   # between the two post-ping reads that decide the verdict (drift 60s vs 5s tolerance)
+# Post-ping timings, overridable from the environment to tune a deployment (or
+# a test) without editing code.
+SETTLE_SECS = float(os.environ.get("YO_PROBE_SETTLE_SECS", 10))  # before the first post-read, so a late-registering anchor reads locked
+POST_WAIT_SECS = float(os.environ.get("YO_PROBE_WAIT_SECS", 60))  # between the two post-reads (drift 60s vs 5s tolerance)
 DEFAULT_PROMPT = "yo"  # mirrors yo's PROMPT default; the recorder needs the effective value
 OBSERVATION_ERRORS = (OSError, RuntimeError, ValueError, KeyError)
 

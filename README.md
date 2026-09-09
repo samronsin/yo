@@ -85,7 +85,8 @@ Exit status is `0` whenever a window is open or the run could not be judged,
 `3` when the window is verifiably still closed, and the ping's own status
 when the ping itself failed. Each run takes about 1.5 minutes longer than the
 ping alone; a per-command lock skips a run that overlaps one still being
-verified.
+verified. `YO_PROBE_SETTLE_SECS` and `YO_PROBE_WAIT_SECS` override the two
+post-ping timings.
 
 ```sh
 ./yo codex                               # default ping, verified and recorded
