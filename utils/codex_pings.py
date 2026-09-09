@@ -25,7 +25,7 @@ else:
 
 SCHEMA = 1
 BACKEND = "codex"  # the only backend with a quota observer
-OVERRIDES = ("model", "effort", "thread_source", "prompt")
+OVERRIDES = ("model", "effort", "thread_source")
 RECORD_PREFIX = "record: "  # marks the machine-readable line in a run log
 # Exit status by outcome; execution errors propagate the ping's own status.
 EXIT_CODES = {"anchored": 0, "window_open": 0, "inconclusive": 0, "observation_error": 0,
@@ -109,7 +109,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("command")
     parser.add_argument("--backend", default=BACKEND, help=f"only {BACKEND} is supported")
-    for name in ("model", "effort", "thread-source", "prompt"):
+    for name in ("model", "effort", "thread-source"):
         parser.add_argument(f"--{name}", default="", help="override yo's default")
     args = parser.parse_args()
     try:

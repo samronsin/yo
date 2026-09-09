@@ -22,7 +22,7 @@ def sample(at, reset=None, used=0):
 
 
 def args_for(**overrides):
-    base = dict(command="wrapper", backend="codex", model="", effort="", thread_source="", prompt="")
+    base = dict(command="wrapper", backend="codex", model="", effort="", thread_source="")
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -94,7 +94,7 @@ class ProbeTests(ScratchCase):
             yield read, ping, sleep
 
     def check_probe(self, reads, outcome, calls=1, rc=0, sleeps=(15, 10, 60)):
-        variant = {"model": "gpt-5.6-terra", "effort": "medium", "thread_source": "", "prompt": "yo"}
+        variant = {"model": "gpt-5.6-terra", "effort": "medium", "thread_source": ""}
         with self.probe_doubles(reads, rc) as (read, ping, sleep):
             result = anchor.probe(variant, "wrapper", self.root / "ping.log")
         self.assertEqual([c.args[0] for c in sleep.call_args_list], list(sleeps))
@@ -109,16 +109,16 @@ class ProbeTests(ScratchCase):
         log.write_text("agent=wrapper backend=codex model=gpt-5.6-terra reasoning_effort=medium thread_source=user(default)\n"
                        "OpenAI Codex v0.153.4\nsession id: 01a08697-1a0a\nuser\nyo\ncodex\nYo\ntokens used\n2,403\n")
         usage = self.patch(anchor, "session_usage", return_value={"cached_input_tokens": 11008})
-        details = anchor.ping_details(log, {"model": "", "effort": "", "thread_source": "", "prompt": ""})
+        details = anchor.ping_details(log, {"model": "", "effort": "", "thread_source": ""})
         usage.assert_called_once_with("01a08697-1a0a")
         self.assertEqual(details["effective"], {"model": "gpt-5.6-terra", "effort": "medium",
                                                 "thread_source": "", "prompt": "yo"})
         self.assertEqual((details["cli_version"], details["tokens_used"]), ("0.153.4", 2403))
         self.assertEqual(details["usage"], {"cached_input_tokens": 11008})
         log.write_text("agent=wrapper backend=codex model=m reasoning_effort=high thread_source=scheduled\n")
-        details = anchor.ping_details(log, {"model": "m", "effort": "high", "thread_source": "scheduled", "prompt": "hi"})
+        details = anchor.ping_details(log, {"model": "m", "effort": "high", "thread_source": "scheduled"})
         self.assertEqual(details["effective"]["thread_source"], "scheduled")
-        self.assertEqual(details["effective"]["prompt"], "hi")
+        self.assertEqual(details["effective"]["prompt"], "yo")
         self.assertNotIn("usage", details)
 
     def test_session_usage_is_the_cumulative_total_across_requests(self):
@@ -163,7 +163,7 @@ class RecordTests(ScratchCase):
     def test_each_run_appends_one_line_with_identity_and_exit_codes(self):
         with self.probe_returning("anchored") as probe:
             self.assertEqual(pings.run(args_for()), 0)
-        self.assertEqual(probe.call_args.args[0], {"model": "", "effort": "", "thread_source": "", "prompt": ""})
+        self.assertEqual(probe.call_args.args[0], {"model": "", "effort": "", "thread_source": ""})
         (record,) = self.records()
         self.assertEqual({k: record[k] for k in ("schema", "command", "executable", "cli_version", "source", "outcome")},
                          {"schema": 1, "command": "wrapper", "executable": "/opt/bin/wrapper",
@@ -219,15 +219,15 @@ class DispatchTests(ScratchCase):
     def test_a_codex_ping_flows_through_the_recorder_and_back_into_its_log(self):
         # One real recorded ping (it pays the post-ping settle); the mocked
         # RecordTests cover the other outcomes and exit codes.
-        run = self.yo("--prompt", "test prompt", "--model", "gpt-5.6-luna", "--thread-source", "scheduled")
+        run = self.yo("--model", "gpt-5.6-luna", "--thread-source", "scheduled")
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(run.stdout, "")  # cron stays quiet; the verdict lives in the logs
-        self.assertEqual(self.sent_prompt(), "test prompt")
+        self.assertEqual(self.sent_prompt(), "yo")
         (record,) = self.loaded()
         self.assertEqual((record["source"], record["outcome"], record["cli_version"], record["returncode"]),
                          ("manual", "observation_error", "codex-cli test-version", 0))
         self.assertEqual(record["effective"],
-                         {"model": "gpt-5.6-luna", "effort": "medium", "thread_source": "scheduled", "prompt": "test prompt"})
+                         {"model": "gpt-5.6-luna", "effort": "medium", "thread_source": "scheduled", "prompt": "yo"})
         self.assertIn("fixture has no quota api", record["read_error"])
         (ping_log,) = pings.run_logs("wrapper", self.log_dir)
         self.assertEqual(ping_log.resolve(), Path(record["log"]).resolve())
@@ -243,10 +243,9 @@ class DispatchTests(ScratchCase):
         self.assertFalse(self.argv.exists())
         self.assertEqual([r["outcome"] for r in self.loaded()], ["window_open"])
 
-        raw = self.yo("--no-record", "--prompt", '17 * 23; $(touch not-executed) "quoted"')
+        raw = self.yo("--no-record")
         self.assertEqual(raw.returncode, 0, raw.stderr)
-        self.assertEqual(self.sent_prompt(), '17 * 23; $(touch not-executed) "quoted"')
-        self.assertFalse((self.root / "not-executed").exists())
+        self.assertEqual(self.sent_prompt(), "yo")
         self.assertEqual(len(self.loaded()), 1)
 
     def test_claude_stays_plain(self):
@@ -255,14 +254,6 @@ class DispatchTests(ScratchCase):
         self.assertEqual(self.sent_prompt(), "yo")
         self.assertEqual(self.loaded(), [])
         self.assertEqual(len(pings.run_logs("wrapper", self.log_dir)), 1)  # the plain run log, no record
-
-    def test_hyphen_leading_prompts_reach_the_model_not_the_option_parser(self):
-        for backend in ("codex", "claude"):
-            run = self.yo("--no-record", "--prompt", "--help", backend=backend)
-            self.assertEqual(run.returncode, 0, run.stderr)
-            argv = json.loads(self.argv.read_text())
-            self.argv.unlink()
-            self.assertEqual(argv[-2:], ["--", "--help"], backend)
 
 
 if __name__ == "__main__":

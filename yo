@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 PROMPT="yo"
 
-usage() { echo "usage: $(basename "$0") <command> [--backend codex|claude] [--model MODEL] [--effort EFFORT] [--thread-source SOURCE] [--prompt TEXT] [--no-record]" >&2; exit 2; }
+usage() { echo "usage: $(basename "$0") <command> [--backend codex|claude] [--model MODEL] [--effort EFFORT] [--thread-source SOURCE] [--no-record]" >&2; exit 2; }
 
 # Args: required first is the CLI command to invoke. It's either a canonical
 # backend name ("codex"/"claude", e.g. `yo claude`) or any command pointing at a
@@ -12,12 +12,10 @@ usage() { echo "usage: $(basename "$0") <command> [--backend codex|claude] [--mo
 # runner flags to apply and is required unless the command is itself a backend
 # name (then it's inferred), so the command name is free. COMMAND stays the
 # actual command invoked and the per-command log/crontab key, so several
-# coexist. Optional --model/--effort/--thread-source/--prompt override the
-# defaults (codex only for effort and thread source) so the recorder can vary
-# them through this script instead of duplicating the codex invocation. The
-# prompt is always passed after `--` so text starting with a hyphen (e.g.
-# --help) reaches the model instead of the CLI's option parser.
-# Validate before logging so a bad/missing arg fails fast to stderr.
+# coexist. Optional --model/--effort/--thread-source override the defaults
+# (codex only for the latter two) so the recorder can vary them through this
+# script instead of duplicating the codex invocation. Validate before logging
+# so a bad/missing arg fails fast to stderr.
 COMMAND="${1:-}"
 [[ -n "$COMMAND" && "$COMMAND" != -* ]] || usage
 shift
@@ -26,7 +24,6 @@ BACKEND=""
 MODEL=""
 EFFORT=""
 THREAD_SOURCE=""
-PROMPT_ARG=""
 NO_RECORD=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -34,7 +31,6 @@ while [[ $# -gt 0 ]]; do
     --model)         [[ $# -ge 2 ]] || usage; MODEL="$2"; shift 2 ;;
     --effort)        [[ $# -ge 2 ]] || usage; EFFORT="$2"; shift 2 ;;
     --thread-source) [[ $# -ge 2 ]] || usage; THREAD_SOURCE="$2"; shift 2 ;;
-    --prompt)        [[ $# -ge 2 ]] || usage; PROMPT="$2"; PROMPT_ARG="$2"; shift 2 ;;
     --no-record)     NO_RECORD=true; shift ;;
     *)               usage ;;
   esac
@@ -68,7 +64,7 @@ esac
 # quota observer, so it always takes the plain path.
 if [[ "$BACKEND" == codex && "$NO_RECORD" != true ]]; then
   exec python3 "$ROOT_DIR/utils/codex_pings.py" "$COMMAND" \
-    --model "$MODEL" --effort "$EFFORT" --thread-source "$THREAD_SOURCE" --prompt="$PROMPT_ARG"
+    --model "$MODEL" --effort "$EFFORT" --thread-source "$THREAD_SOURCE"
 fi
 
 # Logs are named per command so separate runs stay separate. The recorder
@@ -118,7 +114,7 @@ run_codex() {
     -c "include_collaboration_mode_instructions=false" \
     -c "project_doc_max_bytes=0" \
     -c "tool_output_token_limit=1024" \
-    -- "$PROMPT"
+    "$PROMPT"
 }
 
 run_claude() {
@@ -133,7 +129,7 @@ run_claude() {
     --model "$model" \
     --output-format text \
     --permission-mode default \
-    -- "$PROMPT" >"$LAST_MESSAGE_FILE"
+    "$PROMPT" >"$LAST_MESSAGE_FILE"
   rc=$?
   cat "$LAST_MESSAGE_FILE"
   return "$rc"

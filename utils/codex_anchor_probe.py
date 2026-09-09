@@ -33,7 +33,7 @@ OPEN_WINDOW_MARGIN_SECS = 90  # hypothetical window reads ~now+5h; less means re
 PRE_WAIT_SECS = 15    # second pre-read, only when one read cannot tell idle from active
 SETTLE_SECS = 10      # after the ping, before the first post-read, so a late-registering anchor reads locked
 POST_WAIT_SECS = 60   # between the two post-ping reads that decide the verdict (drift 60s vs 5s tolerance)
-DEFAULT_PROMPT = "yo"  # mirrors yo's PROMPT default; the recorder needs the effective value
+DEFAULT_PROMPT = "yo"  # mirrors yo's PROMPT; recorded as evidence of what each ping sent
 OBSERVATION_ERRORS = (OSError, RuntimeError, ValueError, KeyError)
 
 
@@ -121,8 +121,7 @@ def run_ping(variant, command, log_file):
     Returns (returncode, stderr).
     """
     cmd = [str(ROOT_DIR / "yo"), command, "--backend", "codex", "--no-record"]
-    for flag, key in (("--model", "model"), ("--effort", "effort"),
-                      ("--thread-source", "thread_source"), ("--prompt", "prompt")):
+    for flag, key in (("--model", "model"), ("--effort", "effort"), ("--thread-source", "thread_source")):
         if variant.get(key):
             cmd += [flag, variant[key]]
     proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
@@ -166,7 +165,7 @@ def quick_state(read):
 def ping_details(log_file, variant):
     """What the ping actually ran, parsed from yo's own log of it."""
     details = {"effective": {key: variant.get(key) or "" for key in ("model", "effort", "thread_source")}}
-    details["effective"]["prompt"] = variant.get("prompt") or DEFAULT_PROMPT
+    details["effective"]["prompt"] = DEFAULT_PROMPT
     try:
         text = Path(log_file).read_text(errors="replace")
     except OSError:
@@ -286,7 +285,6 @@ def probe(variant, command, log_file, pre_wait=PRE_WAIT_SECS, settle=SETTLE_SECS
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     parser.add_argument("--command", default="codex", help="Codex executable or wrapper")
-    parser.add_argument("--prompt", default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument("--effort", choices=["low", "medium", "high"], default=None)
     parser.add_argument("--thread-source", default=None)
@@ -298,7 +296,7 @@ def main() -> int:
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     log_dir = ROOT_DIR / "logs"
     log_dir.mkdir(exist_ok=True)
-    variant = {name: getattr(args, name) or "" for name in ("model", "effort", "thread_source", "prompt")}
+    variant = {name: getattr(args, name) or "" for name in ("model", "effort", "thread_source")}
     result = probe(variant, args.command, log_dir / f"gap-anchor-test-{stamp}.log",
                    post_wait=args.wait, force=args.force)
     result_path = log_dir / f"gap-anchor-test-{stamp}.json"

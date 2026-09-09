@@ -90,7 +90,6 @@ verified.
 ```sh
 ./yo codex                               # default ping, verified and recorded
 ./yo codex --no-record                   # raw ping, nothing recorded (smoke test)
-./yo codex --prompt 'Calculate 17 * 23.'  # manual override, recorded as such
 grep -h '^record: ' logs/yo-codex-*.log | sed 's/^record: //' | python3 -m json.tool
 ```
 
@@ -234,7 +233,7 @@ verdict (the `record:` line in its run log), so start there. Two utilities remai
 one-off work:
 
 - `utils/codex_anchor_probe.py [--command WRAPPER] [--model M] [--effort E]
-  [--thread-source S] [--prompt TEXT] [--wait SECS] [--force]` — the observer
+  [--thread-source S] [--wait SECS] [--force]` — the observer
   the recorder uses, run as a one-shot outside the recorded history: one ping
   via `./yo ... --no-record`, then two rate-limit reads `--wait` seconds apart
   (60s default). Its verdict and evidence go to `logs/gap-anchor-test-*`.
