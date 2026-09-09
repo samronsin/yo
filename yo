@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 PROMPT="yo"
 
-usage() { echo "usage: $(basename "$0") <command> [--backend codex|claude] [--model MODEL] [--effort EFFORT] [--thread-source SOURCE]" >&2; exit 2; }
+usage() { echo "usage: $(basename "$0") <command> [--backend codex|claude] [--model MODEL] [--effort EFFORT] [--thread-source SOURCE] [--probe]" >&2; exit 2; }
 
 # Args: required first is the CLI command to invoke. It's either a canonical
 # backend name ("codex"/"claude", e.g. `yo claude`) or any command pointing at a
@@ -13,8 +13,10 @@ usage() { echo "usage: $(basename "$0") <command> [--backend codex|claude] [--mo
 # name (then it's inferred), so the command name is free. COMMAND stays the
 # actual command invoked and the per-command log/crontab key, so several
 # coexist. Optional --model/--effort/--thread-source override the defaults
-# (codex only for the latter two). Validate before logging so a bad/missing
-# arg fails fast to stderr.
+# (codex only for the latter two). --probe (codex only) verifies the ping
+# against the account's quota reset and records the verdict in the run log;
+# install.py schedules Codex pings with it. Validate before logging so a
+# bad/missing arg fails fast to stderr.
 COMMAND="${1:-}"
 [[ -n "$COMMAND" && "$COMMAND" != -* ]] || usage
 shift
@@ -23,12 +25,14 @@ BACKEND=""
 MODEL=""
 EFFORT=""
 THREAD_SOURCE=""
+PROBE=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --backend)       [[ $# -ge 2 ]] || usage; BACKEND="$2"; shift 2 ;;
     --model)         [[ $# -ge 2 ]] || usage; MODEL="$2"; shift 2 ;;
     --effort)        [[ $# -ge 2 ]] || usage; EFFORT="$2"; shift 2 ;;
     --thread-source) [[ $# -ge 2 ]] || usage; THREAD_SOURCE="$2"; shift 2 ;;
+    --probe)         PROBE=true; shift ;;
     *)               usage ;;
   esac
 done
@@ -51,13 +55,20 @@ case "$COMMAND" in
 esac
 case "$BACKEND" in
   codex)
-    # The Codex backend lives in Python: it owns the production invocation,
-    # verifies each ping against the account's quota reset, and ends the run
-    # log with the verdict and a `record: {...}` line (utils/codex_runner.py).
+    # The Codex backend lives in Python: it owns the production invocation and,
+    # with --probe, verifies the ping against the account's quota reset and
+    # ends the run log with the verdict and a `record: {...}` line.
+    probe_args=()
+    [[ "$PROBE" == true ]] && probe_args=(--probe)
     exec python3 "$ROOT_DIR/utils/codex_runner.py" "$COMMAND" \
-      --model "$MODEL" --effort "$EFFORT" --thread-source "$THREAD_SOURCE"
+      --model "$MODEL" --effort "$EFFORT" --thread-source "$THREAD_SOURCE" \
+      ${probe_args[@]+"${probe_args[@]}"}
     ;;
-  claude) ;;
+  claude)
+    if [[ "$PROBE" == true ]]; then
+      echo "error: --probe is only supported with the codex backend (Claude exposes no quota window to verify against)" >&2; exit 2
+    fi
+    ;;
   *) echo "error: --backend must be 'codex' or 'claude', got '$BACKEND'" >&2; exit 2 ;;
 esac
 

@@ -32,9 +32,10 @@ the hours or commands, or `./install.py --remove claude` to stop. See
   per-command log. The command is a required first argument: a backend name
   (`codex` or `claude`) or any [custom command](#custom-commands) paired with
   `--backend`. An optional `--model` flag overrides the per-backend default
-  (GPT-5.6-terra for Codex, Haiku for Claude). Every Codex ping is also
-  verified against the account's quota reset and recorded (see
-  [Recorded Codex pings](#recorded-codex-pings)).
+  (GPT-5.6-terra for Codex, Haiku for Claude). With `--probe`, a Codex ping
+  is also verified against the account's quota reset and recorded (see
+  [Recorded Codex pings](#recorded-codex-pings)); `install.py` schedules
+  Codex pings that way.
 - **`install.py`** — generates and installs the crontab. Given a timezone and
   working hours, it builds a schedule that re-anchors each agent's 5h usage
   window across your day (see [Window model](#window-model)) and pipes the
@@ -42,7 +43,7 @@ the hours or commands, or `./install.py --remove claude` to stop. See
   **converted to the system time cron actually schedules against** (see
   [Timezones](#timezones)).
 - **`utils/codex_runner.py`** — the Codex backend `yo` execs into: owns the
-  Codex invocation, verifies each ping, and records it in the run log.
+  Codex invocation and, with `--probe`, verifies and records the ping.
 - **`test_install.py`**, **`test_codex_runner.py`** — unit tests.
 
 ## Usage
@@ -60,8 +61,10 @@ Run once, ad hoc:
 Codex exposes its 5h quota reset through the CLI's token-free `app-server`,
 which makes anchoring observable: a real anchor locks `resetsAt` at ping+5h,
 while an unanchored account reports a hypothetical reset that drifts with the
-clock. So every `yo` run on the Codex backend goes through
-`utils/codex_runner.py`:
+clock. `yo <codex command>` alone is the plain ping: it runs `codex exec`,
+writes the run log, and exits with the ping's status. `--probe` wraps that
+ping in the observer (`utils/codex_runner.py` with
+`utils/codex_anchor_probe.py`):
 
 1. **Pre-read.** One quota read, plus a second 15s later only if the first is
    ambiguous (0% used with a reset near now+5h). A window that is already
@@ -89,9 +92,15 @@ ping alone; a per-command lock skips a run that overlaps one still being
 verified.
 
 ```sh
-./yo codex                               # default ping, verified and recorded
+./yo codex                               # plain ping, about five seconds
+./yo codex --probe                       # the same ping, verified and recorded
 grep -h '^record: ' logs/yo-codex-*.log | sed 's/^record: //' | python3 -m json.tool
 ```
+
+`install.py` emits `--probe` on Codex lines by default, so the block you
+confirm shows it; pass `--no-probe` to schedule plain pings instead. Claude has
+no quota window to verify against, so `--probe` is refused there and never
+scheduled.
 
 Install a schedule (review the snippet, confirm, and it's added to your crontab).
 One command per run — for several, run it once each:
@@ -221,7 +230,7 @@ another timezone), **re-run `install.py`** to re-anchor the schedule.
 ## Logs
 
 Written under `logs/` as `yo-<command>-<timestamp>.log`, with the final message
-in `yo-<command>.last.txt`. Codex run logs end with a `record:` line holding
+in `yo-<command>.last.txt`. Probed Codex runs end with a `record:` line holding
 the ping's verified outcome (see [Recorded Codex pings](#recorded-codex-pings)).
 
 ## Anchor test utilities
@@ -229,7 +238,7 @@ the ping's verified outcome (see [Recorded Codex pings](#recorded-codex-pings)).
 The server-side rules for which pings anchor a 5h window shift silently (see
 issues #9 and PR #14 for the history); when pings stop anchoring, re-bisect
 rather than trusting old conclusions. Every recorded ping already carries its
-verdict (the `record:` line in its run log), so start there. Two utilities remain for
+verdict when probed (the `record:` line in its run log), so start there. Two utilities remain for
 one-off work:
 
 - `utils/codex_anchor_probe.py [--command WRAPPER] [--model M] [--effort E]

@@ -22,7 +22,7 @@ def sample(at, reset=None, used=0):
 
 
 def args_for(**overrides):
-    base = dict(command="wrapper", backend="codex", model="", effort="", thread_source="")
+    base = dict(command="wrapper", backend="codex", model="", effort="", thread_source="", probe=True)
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -188,6 +188,17 @@ class RunTests(ScratchCase):
     def records(self):
         return runner.load_records("wrapper", self.log_dir)
 
+    def test_plain_run_sends_and_logs_without_probing(self):
+        with self.probe_returning("anchored") as probe, \
+                mock.patch.object(runner, "send_ping", return_value={"returncode": 7}) as send:
+            self.assertEqual(runner.run(args_for(probe=False, model="gpt-5.6-luna")), 7)
+        probe.assert_not_called()
+        self.assertEqual(send.call_args.args[1], {**runner.DEFAULTS, "model": "gpt-5.6-luna"})
+        (log,) = runner.run_logs("wrapper", self.log_dir)
+        self.assertIn("yo start", log.read_text())
+        self.assertEqual(self.records(), [])
+        self.assertFalse((self.log_dir / "yo-wrapper.lock").exists())
+
     def test_each_run_writes_one_log_with_identity_verdict_record_and_exit_code(self):
         with self.probe_returning("anchored"):
             self.assertEqual(runner.run(args_for()), 0)
@@ -238,9 +249,20 @@ class DispatchTests(ScratchCase):
         return subprocess.run([str(self.root / "yo"), "wrapper", "--backend", backend, *args],
                               env=env or self.env, capture_output=True, text=True, timeout=30)
 
-    def test_a_codex_ping_is_verified_and_recorded_in_its_run_log(self):
-        # One real recorded ping (it pays the post-ping settle); RunTests cover the other outcomes.
-        run = self.yo("--model", "gpt-5.6-luna", "--thread-source", "scheduled")
+    def test_a_plain_codex_ping_is_just_the_ping(self):
+        run = self.yo("--model", "gpt-5.6-luna")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(self.sent_argv()[-1], "yo")
+        (log,) = runner.run_logs("wrapper", self.log_dir)
+        text = log.read_text()
+        self.assertIn("agent=wrapper backend=codex model=gpt-5.6-luna", text)
+        self.assertTrue(text.rstrip().endswith("yo end rc=0"), text)
+        self.assertEqual(runner.load_records("wrapper", self.log_dir), [])
+        self.assertEqual(self.yo(env=self.env | {"FAKE_CODEX_RC": "7"}).returncode, 7)
+
+    def test_a_probed_codex_ping_is_verified_and_recorded_in_its_run_log(self):
+        # One real probed ping (it pays the post-ping settle); RunTests cover the other outcomes.
+        run = self.yo("--probe", "--model", "gpt-5.6-luna", "--thread-source", "scheduled")
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(run.stdout, "")  # cron stays quiet; the verdict lives in the log
         argv = self.sent_argv()
@@ -261,7 +283,7 @@ class DispatchTests(ScratchCase):
 
     def test_open_window_sends_nothing_and_claude_stays_plain(self):
         open_window = json.dumps({"usedPercent": 12, "windowDurationMins": 300, "resetsAt": time.time() + 7200})
-        skipped = self.yo(env=self.env | {"FAKE_CODEX_QUOTA": open_window})
+        skipped = self.yo("--probe", env=self.env | {"FAKE_CODEX_QUOTA": open_window})
         self.assertEqual(skipped.returncode, 0, skipped.stderr)
         self.assertFalse(self.argv.exists())
         (record,) = runner.load_records("wrapper", self.log_dir)
@@ -272,6 +294,10 @@ class DispatchTests(ScratchCase):
         self.assertEqual(plain.returncode, 0, plain.stderr)
         self.assertEqual(self.sent_argv()[-1], "yo")
         self.assertEqual(len(runner.load_records("wrapper", self.log_dir)), 1)  # a plain run log, no record
+        refused = self.yo("--probe", backend="claude")
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("only supported with the codex backend", refused.stderr)
+        self.assertFalse(self.argv.exists())
 
 
 if __name__ == "__main__":

@@ -149,6 +149,12 @@ class ResolveBackendTest(unittest.TestCase):
 
 
 class ParseArgsTest(unittest.TestCase):
+    def test_no_probe_is_an_install_option(self):
+        self.assertFalse(self._install_parse("--command", "codex").no_probe)
+        self.assertTrue(self._install_parse("--command", "codex", "--no-probe").no_probe)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self._parse("--status", "--no-probe")
+
     def _parse(self, *args):
         return install.parse_args([*args])
 
@@ -214,9 +220,9 @@ class ManagedBlocksTest(unittest.TestCase):
     def test_installed_jobs_round_trips_rendered_blocks(self):
         # The PATH= and comment lines inside each block aren't entries.
         self.assertEqual(installed_jobs(self.CRONTAB), [
-            ("codex", [("0 6 * * *", f"{install.JOB_CMD} codex"),
-                       ("2 11 * * *", f"{install.JOB_CMD} codex")]),
-            ("codex-pro", [("4 16 * * *", f"{install.JOB_CMD} codex-pro --backend codex")]),
+            ("codex", [("0 6 * * *", f"{install.JOB_CMD} codex --probe"),
+                       ("2 11 * * *", f"{install.JOB_CMD} codex --probe")]),
+            ("codex-pro", [("4 16 * * *", f"{install.JOB_CMD} codex-pro --backend codex --probe")]),
         ])
 
     def test_remove_managed_block_keeps_everything_else(self):
@@ -344,7 +350,7 @@ class RemoveTest(unittest.TestCase):
         out, written = self._remove("codex", self.CRONTAB)
         # The block is shown for review before the prompt...
         self.assertIn("Cron block to remove (codex):\n\n# >>> yo-codex >>>\n", out)
-        self.assertIn(f"2 11 * * * {install.JOB_CMD} codex\n# <<< yo-codex <<<\n", out)
+        self.assertIn(f"2 11 * * * {install.JOB_CMD} codex --probe\n# <<< yo-codex <<<\n", out)
         self.assertIn("Crontab updated; yo-codex block removed.\n", out)
         # ...and only it is dropped: the user's lines and the other block survive.
         self.assertNotIn("yo-codex >>>", written)
@@ -399,16 +405,23 @@ class RemoveTest(unittest.TestCase):
 class RenderCronTest(unittest.TestCase):
     def test_backend_name_line_stays_bare(self):
         # A canonical command lets yo infer the backend; no --backend emitted.
-        block = render_cron([6], "Europe/Paris", "codex", "codex", "/bin")
-        self.assertIn(f"{install.JOB_CMD} codex\n", block)
+        block = render_cron([6], "Europe/Paris", "claude", "claude", "/bin")
+        self.assertIn(f"{install.JOB_CMD} claude\n", block)
         self.assertNotIn("--backend", block)
-        self.assertIn("# >>> yo-codex >>>", block)
+        self.assertIn("# >>> yo-claude >>>", block)
 
     def test_custom_command_emits_backend(self):
         # A custom command name carries its backend into the cron line.
-        block = render_cron([6], "Europe/Paris", "work-ai", "codex", "/bin")
-        self.assertIn(f"{install.JOB_CMD} work-ai --backend codex\n", block)
-        self.assertIn("# >>> yo-work-ai >>>", block)
+        block = render_cron([6], "Europe/Paris", "perso", "claude", "/bin")
+        self.assertIn(f"{install.JOB_CMD} perso --backend claude\n", block)
+        self.assertIn("# >>> yo-perso >>>", block)
+
+    def test_codex_lines_probe_by_default_and_only_codex(self):
+        self.assertIn(f"{install.JOB_CMD} codex --probe\n", render_cron([6], "UTC", "codex", "codex", "/bin"))
+        self.assertIn(f"{install.JOB_CMD} work-ai --backend codex --probe\n",
+                      render_cron([6], "UTC", "work-ai", "codex", "/bin"))
+        self.assertIn(f"{install.JOB_CMD} codex\n", render_cron([6], "UTC", "codex", "codex", "/bin", probe=False))
+        self.assertNotIn("--probe", render_cron([6], "UTC", "claude", "claude", "/bin", probe=True))
 
 
 class ToSystemTimesTest(unittest.TestCase):

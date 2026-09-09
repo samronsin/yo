@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""yo's Codex backend: send one ping, verify it anchored, record it in the run log.
+"""yo's Codex backend: send one ping and, with --probe, verify and record it.
 
 `yo <codex command>` execs into here. The production invocation lives in
-codex_command(); the ping is bracketed by utils/codex_anchor_probe.py's
-token-free quota reads, and the run log (logs/yo-<command>-<timestamp>.log)
-ends with a verdict line and one `record: {...}` JSON line: what ran (model,
+codex_command(). A plain run sends it and writes the run log
+(logs/yo-<command>-<timestamp>.log). With --probe the ping is bracketed by
+utils/codex_anchor_probe.py's token-free quota reads and the run log ends
+with a verdict line and one `record: {...}` JSON line: what ran (model,
 effort, thread source, prompt, CLI version, executable), the quota reads,
 token usage including cached input, and the outcome. The series is a grep
 over the run logs; see load_records.
@@ -193,22 +194,26 @@ def run(args):
         raise ValueError(f"{__name__} only runs the {BACKEND} backend, not {args.backend}")
     log_dir = ROOT_DIR / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
+    overrides = {key: getattr(args, key, "") or "" for key in DEFAULTS}
+    config = {key: overrides[key] or DEFAULTS[key] for key in DEFAULTS}
+    utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    log_file = log_dir / f"yo-{args.command}-{utc}.log"
+    for n in itertools.count(2):  # never share a log: it holds at most one record
+        if not log_file.exists():
+            break
+        log_file = log_dir / f"yo-{args.command}-{utc}-{n}.log"
+    last_message_file = log_dir / f"yo-{args.command}.last.txt"
+    append(log_file, f"[{stamp()}] yo start", f"root={ROOT_DIR}")
+    if not getattr(args, "probe", False):
+        return send_ping(args.command, config, log_file, last_message_file)["returncode"]
+
     with (log_dir / f"yo-{args.command}.lock").open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
+            append(log_file, f"[{stamp()}] yo end rc=0 (another ping is still being verified, nothing sent)")
             print(f"{args.command}: another ping is still being verified; skipped", file=sys.stderr)
             return 0
-        overrides = {key: getattr(args, key, "") or "" for key in DEFAULTS}
-        config = {key: overrides[key] or DEFAULTS[key] for key in DEFAULTS}
-        utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        log_file = log_dir / f"yo-{args.command}-{utc}.log"
-        for n in itertools.count(2):  # never share a log: it holds exactly one record
-            if not log_file.exists():
-                break
-            log_file = log_dir / f"yo-{args.command}-{utc}-{n}.log"
-        append(log_file, f"[{stamp()}] yo start", f"root={ROOT_DIR}")
-        last_message_file = log_dir / f"yo-{args.command}.last.txt"
         record = probe(lambda: send_ping(args.command, config, log_file, last_message_file), args.command)
         record.update(schema=SCHEMA, command=args.command, executable=shutil.which(args.command),
                       source="manual" if any(overrides.values()) else "default",
@@ -231,6 +236,8 @@ def main():
     parser.add_argument("--backend", default=BACKEND, help=f"only {BACKEND} is supported")
     for name in ("model", "effort", "thread-source"):
         parser.add_argument(f"--{name}", default="", help="override the default")
+    parser.add_argument("--probe", action="store_true",
+                        help="verify the ping against the quota reset and record the verdict")
     args = parser.parse_args()
     try:
         return run(args)

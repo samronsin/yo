@@ -126,6 +126,8 @@ def parse_args(argv=None):
     parser.add_argument("--backend", choices=BACKENDS,
                         help="Runner backend for a custom --command; a backend "
                              "name (codex/claude) is its own backend")
+    parser.add_argument("--no-probe", action="store_true",
+                        help="Schedule plain Codex pings instead of verified, recorded ones (see yo --probe)")
     parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     args = parser.parse_args(argv)
     # --status and --remove act on the installed crontab without computing a
@@ -138,6 +140,8 @@ def parse_args(argv=None):
         if missing:
             parser.error(f"the following arguments are required: {', '.join(missing)}")
     else:
+        if args.no_probe:
+            parser.error(f"{mode_flag} cannot be combined with --no-probe")
         given = [flag for flag, value in (*required, ("--backend", args.backend))
                  if value is not None]
         if given:
@@ -239,7 +243,7 @@ def cron_path_for(commands):
     return ":".join(dict.fromkeys(dirs + BASE_CRON_PATH.split(":")))
 
 
-def render_cron(system_times, tz, command, backend, cron_path):
+def render_cron(system_times, tz, command, backend, cron_path, probe=None):
     """Render the managed crontab block for the given run times.
 
     The times are emitted in the daemon's own timezone (see to_system_times); we
@@ -256,10 +260,15 @@ def render_cron(system_times, tz, command, backend, cron_path):
             `command` is itself a backend (then `yo` infers it and the line
             stays bare).
         cron_path: PATH value for the block (see cron_path_for).
+        probe: Emit `--probe` so each run is verified and recorded. Defaults to
+            True for the codex backend (the only one with a quota observer)
+            and is never emitted for others.
 
     Returns:
         The crontab text, wrapped in the begin/end markers, ending in a newline.
     """
+    if probe is None:
+        probe = backend == "codex"
     begin, end = markers(command)
     local_tz = datetime.now().astimezone().tzname()
     lines = [
@@ -269,9 +278,10 @@ def render_cron(system_times, tz, command, backend, cron_path):
         "",
     ]
     backend_arg = "" if command == backend else f" --backend {backend}"
+    probe_arg = " --probe" if probe and backend == "codex" else ""
     for t in system_times:
         hour, minute = hour_minute(t)
-        lines.append(f"{minute} {hour} * * * {JOB_CMD} {command}{backend_arg}")
+        lines.append(f"{minute} {hour} * * * {JOB_CMD} {command}{backend_arg}{probe_arg}")
     lines.append(end)
     return "\n".join(lines) + "\n"
 
@@ -446,7 +456,8 @@ def install_schedule(args):
 
     run_times = compute_run_times(start, end, args.num_windows, args.window_hours)
     system_times = to_system_times(run_times, args.tz)
-    cron_content = render_cron(system_times, args.tz, command, backend, cron_path)
+    cron_content = render_cron(system_times, args.tz, command, backend, cron_path,
+                               probe=backend == "codex" and not args.no_probe)
 
     requested = ", ".join(f"{h:02d}:{m:02d}" for h, m in map(hour_minute, run_times))
     scheduled = ", ".join(f"{h:02d}:{m:02d}" for h, m in map(hour_minute, system_times))
