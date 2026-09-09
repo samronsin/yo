@@ -49,6 +49,15 @@ class ProbeTests(ScratchCase):
         self.assertEqual(anchor.quick_state(sample(100, 50)), "idle")
         self.assertIsNone(anchor.quick_state(sample(100)))
 
+    def test_five_hour_window_is_found_wherever_it_sits(self):
+        five_hour = {"usedPercent": 25, "windowDurationMins": 300, "resetsAt": 1788975739}
+        weekly = {"usedPercent": 36, "windowDurationMins": 10080, "resetsAt": 1789446610}
+        self.assertIs(anchor.five_hour_window({"primary": five_hour, "secondary": weekly}), five_hour)
+        self.assertIs(anchor.five_hour_window({"primary": weekly, "secondary": five_hour}), five_hour)
+        for limits in ({"primary": weekly}, {"primary": None, "secondary": None}, {}):
+            with self.assertRaisesRegex(RuntimeError, "no five-hour quota window"):
+                anchor.five_hour_window(limits)
+
     def test_open_window_skips_the_ping_after_one_read(self):
         result = self.check_probe([sample(100, 18100, used=7)], "window_open", calls=0, sleeps=[])
         self.assertEqual(result["pre_state"], "active")

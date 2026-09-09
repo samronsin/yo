@@ -82,20 +82,33 @@ def read_rate_limits(timeout: float = 30.0, command: str = "codex") -> dict:
                 if msg.get("id") == 2:
                     if "error" in msg:
                         raise RuntimeError(f"rateLimits read failed: {msg['error']}")
-                    primary = (msg.get("result") or {}).get("rateLimits", {}).get("primary")
-                    if not primary or primary.get("windowDurationMins") != 300:
-                        raise RuntimeError("no supported primary five-hour quota window")
-                    reset = primary.get("resetsAt")
+                    window = five_hour_window((msg.get("result") or {}).get("rateLimits") or {})
+                    reset = window.get("resetsAt")
                     if (isinstance(reset, bool) or not isinstance(reset, (int, float))
                             or not math.isfinite(reset)):
                         raise RuntimeError("missing or invalid quota reset timestamp")
-                    return {"read_at": time.time(), "resets_at": primary["resetsAt"],
-                            "used_percent": primary.get("usedPercent")}
+                    return {"read_at": time.time(), "resets_at": reset,
+                            "used_percent": window.get("usedPercent")}
     finally:
         proc.kill()
         proc.wait()
         proc.stdin.close()
         proc.stdout.close()
+
+
+def five_hour_window(rate_limits):
+    """The 5h limit out of the account's limits, wherever it sits.
+
+    Every verdict here assumes a 300-minute window (WINDOW_SECS). It is
+    normally `primary` with the weekly limit as `secondary`, but a plan can
+    report the weekly limit alone (seen 2026-08-08 to 08-24), and judging a
+    weekly reset with 5h arithmetic would give a confident wrong answer.
+    """
+    for slot in ("primary", "secondary"):
+        limit = rate_limits.get(slot)
+        if isinstance(limit, dict) and limit.get("windowDurationMins") == WINDOW_SECS // 60:
+            return limit
+    raise RuntimeError("the account reports no five-hour quota window")
 
 
 def run_ping(variant, command, log_file):
