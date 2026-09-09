@@ -54,16 +54,7 @@ case "$COMMAND" in
     ;;
 esac
 case "$BACKEND" in
-  codex)
-    # The Codex backend lives in Python: it owns the production invocation and,
-    # with --probe, verifies the ping against the account's quota reset and
-    # ends the run log with the verdict and a `record: {...}` line.
-    probe_args=()
-    [[ "$PROBE" == true ]] && probe_args=(--probe)
-    exec python3 "$ROOT_DIR/utils/codex_runner.py" "$COMMAND" \
-      --model "$MODEL" --effort "$EFFORT" --thread-source "$THREAD_SOURCE" \
-      ${probe_args[@]+"${probe_args[@]}"}
-    ;;
+  codex) ;;
   claude)
     if [[ "$PROBE" == true ]]; then
       echo "error: --probe is only supported with the codex backend (Claude exposes no quota window to verify against)" >&2; exit 2
@@ -72,43 +63,50 @@ case "$BACKEND" in
   *) echo "error: --backend must be 'codex' or 'claude', got '$BACKEND'" >&2; exit 2 ;;
 esac
 
-# Logs are named per command so separate runs stay separate.
-LOG_DIR="$ROOT_DIR/logs"
-LAST_MESSAGE_FILE="$LOG_DIR/yo-$COMMAND.last.txt"
-
-mkdir -p "$LOG_DIR"
-timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-log_file="$LOG_DIR/yo-$COMMAND-$timestamp.log"
+run_codex() {
+  # The Python runner owns Codex's invocation, logging, and optional probe.
+  local probe_args=()
+  [[ "$PROBE" == true ]] && probe_args=(--probe)
+  exec python3 "$ROOT_DIR/utils/codex_runner.py" "$COMMAND" \
+    --model "$MODEL" --effort "$EFFORT" --thread-source "$THREAD_SOURCE" \
+    ${probe_args[@]+"${probe_args[@]}"}
+}
 
 run_claude() {
   local model="${MODEL:-haiku}" rc
-  echo "agent=$COMMAND backend=claude model=$model"
-  # --print: non-interactive. default permission mode keeps it non-blocking and
-  # read-only (in print mode an unpermitted tool call is denied, not prompted).
-  # stdout is the final message; capture it, then echo into the log. Capture
-  # claude's exit code before cat so we report the real status.
-  "$COMMAND" \
-    --print \
-    --model "$model" \
-    --output-format text \
-    --permission-mode default \
-    "$PROMPT" >"$LAST_MESSAGE_FILE"
-  rc=$?
-  cat "$LAST_MESSAGE_FILE"
-  return "$rc"
+  local log_dir="$ROOT_DIR/logs" timestamp log_file last_message_file
+  last_message_file="$log_dir/yo-$COMMAND.last.txt"
+  mkdir -p "$log_dir"
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  log_file="$log_dir/yo-$COMMAND-$timestamp.log"
+
+  {
+    echo "[$(date -Is)] yo start"
+    echo "root=$ROOT_DIR"
+
+    cd "$ROOT_DIR"
+
+    set +e
+    echo "agent=$COMMAND backend=claude model=$model"
+    # --print: non-interactive. An unpermitted tool call is denied, not prompted.
+    # stdout is the final message; capture it, then echo into the log, preserving
+    # Claude's exit code.
+    "$COMMAND" \
+      --print \
+      --model "$model" \
+      --output-format text \
+      --permission-mode default \
+      "$PROMPT" >"$last_message_file"
+    rc=$?
+    cat "$last_message_file"
+    set -e
+
+    echo "[$(date -Is)] yo end rc=$rc"
+    return "$rc"
+  } >>"$log_file" 2>&1
 }
 
-{
-  echo "[$(date -Is)] yo start"
-  echo "root=$ROOT_DIR"
-
-  cd "$ROOT_DIR"
-
-  set +e
-  run_claude
-  rc=$?
-  set -e
-
-  echo "[$(date -Is)] yo end rc=$rc"
-  exit "$rc"
-} >>"$log_file" 2>&1
+case "$BACKEND" in
+  codex) run_codex ;;
+  claude) run_claude ;;
+esac
