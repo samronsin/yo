@@ -1,6 +1,6 @@
 """Offline checks for recorded Codex pings: verdicts, persistence, dispatch."""
 import argparse
-from contextlib import redirect_stderr
+from contextlib import contextmanager, redirect_stderr
 import fcntl
 import io
 import json
@@ -27,7 +27,21 @@ def args_for(**overrides):
     return argparse.Namespace(**base)
 
 
-class ProbeTests(unittest.TestCase):
+class ScratchCase(unittest.TestCase):
+    """A scratch directory per test, plus mocks that are undone automatically."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+
+    def patch(self, target, attribute, *args, **kwargs):
+        patcher = mock.patch.object(target, attribute, *args, **kwargs)
+        self.addCleanup(patcher.stop)
+        return patcher.start()
+
+
+class ProbeTests(ScratchCase):
     def test_window_state_and_quick_state(self):
         self.assertEqual(anchor.window_state([sample(100, 18100), sample(115, 18100)]), "active")
         self.assertEqual(anchor.window_state([sample(100), sample(115)]), "idle")
@@ -61,54 +75,52 @@ class ProbeTests(unittest.TestCase):
         self.assertIn("no app-server", result["read_error"])
         self.assertNotIn("post_state", result)
 
+    @contextmanager
+    def probe_doubles(self, reads, rc):
+        """Stand in for the quota reads, the ping and the clock around one probe() call."""
+        with mock.patch.object(anchor, "read_rate_limits", side_effect=reads) as read, \
+                mock.patch.object(anchor, "run_ping", return_value=(rc, "")) as ping, \
+                mock.patch.object(anchor.time, "sleep") as sleep, \
+                mock.patch.object(anchor.time, "time", side_effect=[90, 116, 120, 400, 401]):
+            yield read, ping, sleep
+
     def check_probe(self, reads, outcome, calls=1, rc=0, sleeps=(15, 180)):
-        with tempfile.TemporaryDirectory() as temp:
-            log_file = Path(temp) / "ping.log"
-            with mock.patch.object(anchor, "read_rate_limits", side_effect=reads) as read, \
-                    mock.patch.object(anchor, "run_ping", return_value=(rc, "")) as ping, \
-                    mock.patch.object(anchor.time, "sleep") as sleep, \
-                    mock.patch.object(anchor.time, "time", side_effect=[90, 116, 120, 400, 401]):
-                variant = {"model": "gpt-5.6-terra", "effort": "medium", "thread_source": "", "prompt": "yo"}
-                result = anchor.probe(variant, "wrapper", log_file)
-            self.assertEqual([c.args[0] for c in sleep.call_args_list], list(sleeps))
-            self.assertEqual(ping.call_count, calls)
-            self.assertEqual(read.call_count, len(reads))
-            self.assertTrue(all(c.kwargs == {"command": "wrapper"} for c in read.call_args_list))
-            self.assertEqual(result["outcome"], outcome)
-            return result
+        variant = {"model": "gpt-5.6-terra", "effort": "medium", "thread_source": "", "prompt": "yo"}
+        with self.probe_doubles(reads, rc) as (read, ping, sleep):
+            result = anchor.probe(variant, "wrapper", self.root / "ping.log")
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], list(sleeps))
+        self.assertEqual(ping.call_count, calls)
+        self.assertEqual(read.call_count, len(reads))
+        self.assertTrue(all(c.kwargs == {"command": "wrapper"} for c in read.call_args_list))
+        self.assertEqual(result["outcome"], outcome)
+        return result
 
     def test_ping_details_come_from_the_ping_log(self):
-        with tempfile.TemporaryDirectory() as temp:
-            log = Path(temp) / "yo-wrapper-x.log"
-            log.write_text("agent=wrapper backend=codex model=gpt-5.6-terra reasoning_effort=medium thread_source=user(default)\n"
-                           "OpenAI Codex v0.153.4\nsession id: 01a08697-1a0a\nuser\nyo\ncodex\nYo\ntokens used\n2,403\n")
-            with mock.patch.object(anchor, "session_usage", return_value={"cached_input_tokens": 11008}) as usage:
-                details = anchor.ping_details(log, {"model": "", "effort": "", "thread_source": "", "prompt": ""})
-            usage.assert_called_once_with("01a08697-1a0a")
-            self.assertEqual(details["effective"], {"model": "gpt-5.6-terra", "effort": "medium",
-                                                    "thread_source": "", "prompt": "yo"})
-            self.assertEqual((details["cli_version"], details["tokens_used"]), ("0.153.4", 2403))
-            self.assertEqual(details["usage"], {"cached_input_tokens": 11008})
-            log.write_text("agent=wrapper backend=codex model=m reasoning_effort=high thread_source=scheduled\n")
-            details = anchor.ping_details(log, {"model": "m", "effort": "high", "thread_source": "scheduled", "prompt": "hi"})
-            self.assertEqual(details["effective"]["thread_source"], "scheduled")
-            self.assertEqual(details["effective"]["prompt"], "hi")
-            self.assertNotIn("usage", details)
+        log = self.root / "yo-wrapper-x.log"
+        log.write_text("agent=wrapper backend=codex model=gpt-5.6-terra reasoning_effort=medium thread_source=user(default)\n"
+                       "OpenAI Codex v0.153.4\nsession id: 01a08697-1a0a\nuser\nyo\ncodex\nYo\ntokens used\n2,403\n")
+        usage = self.patch(anchor, "session_usage", return_value={"cached_input_tokens": 11008})
+        details = anchor.ping_details(log, {"model": "", "effort": "", "thread_source": "", "prompt": ""})
+        usage.assert_called_once_with("01a08697-1a0a")
+        self.assertEqual(details["effective"], {"model": "gpt-5.6-terra", "effort": "medium",
+                                                "thread_source": "", "prompt": "yo"})
+        self.assertEqual((details["cli_version"], details["tokens_used"]), ("0.153.4", 2403))
+        self.assertEqual(details["usage"], {"cached_input_tokens": 11008})
+        log.write_text("agent=wrapper backend=codex model=m reasoning_effort=high thread_source=scheduled\n")
+        details = anchor.ping_details(log, {"model": "m", "effort": "high", "thread_source": "scheduled", "prompt": "hi"})
+        self.assertEqual(details["effective"]["thread_source"], "scheduled")
+        self.assertEqual(details["effective"]["prompt"], "hi")
+        self.assertNotIn("usage", details)
 
 
-class RecordTests(unittest.TestCase):
+class RecordTests(ScratchCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        super().setUp()
         self.path = self.root / "logs" / "yo-wrapper.pings.jsonl"
-        patches = [mock.patch.object(pings, "ROOT_DIR", self.root),
-                   mock.patch.object(pings, "cli_version", return_value="0.153.4"),
-                   mock.patch.object(pings.shutil, "which", return_value="/opt/bin/wrapper"),
-                   mock.patch.object(pings.sys.stdout, "isatty", return_value=False)]
-        for p in patches:
-            p.start()
-            self.addCleanup(p.stop)
-        self.addCleanup(self.temp.cleanup)
+        self.patch(pings, "ROOT_DIR", self.root)
+        self.patch(pings, "cli_version", return_value="0.153.4")
+        self.patch(pings.shutil, "which", return_value="/opt/bin/wrapper")
+        self.patch(pings.sys.stdout, "isatty", return_value=False)
 
     def probe_returning(self, outcome, rc=0):
         def fake_probe(variant, command, log_file):
@@ -150,11 +162,9 @@ class RecordTests(unittest.TestCase):
         probe.assert_not_called()
 
 
-class DispatchTests(unittest.TestCase):
+class DispatchTests(ScratchCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        super().setUp()
         source = Path(__file__).resolve().parent
         shutil.copy(source / "yo", self.root / "yo")
         shutil.copytree(source / "utils", self.root / "utils", ignore=shutil.ignore_patterns("__pycache__"))
