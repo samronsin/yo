@@ -67,7 +67,7 @@ clock. So every `yo` run on the Codex backend goes through
    ambiguous (0% used with a reset near now+5h). A window that is already
    open means nothing is sent and the run is recorded as `window_open`.
 2. **Ping.** The production invocation, unchanged, via `yo ... --no-record`.
-3. **Post-reads.** Two reads 180s apart decide the verdict: `anchored`,
+3. **Post-reads.** After a 10s settle, two reads 60s apart decide the verdict: `anchored`,
    `not_anchored`, or `inconclusive` (a window is live but was not opened by
    this ping). A ping that failed is `execution_error`; one whose quota could
    not be read afterwards is `observation_error`. A failed pre-read never
@@ -83,7 +83,7 @@ clock. So every `yo` run on the Codex backend goes through
 
 Exit status is `0` whenever a window is open or the run could not be judged,
 `3` when the window is verifiably still closed, and the ping's own status
-when the ping itself failed. Each run takes about 3.5 minutes longer than the
+when the ping itself failed. Each run takes about 1.5 minutes longer than the
 ping alone; a per-command lock skips a run that overlaps one still being
 verified.
 
@@ -237,7 +237,7 @@ one-off work:
   [--thread-source S] [--prompt TEXT] [--wait SECS] [--force]` — the observer
   the recorder uses, run as a one-shot outside the recorded history: one ping
   via `./yo ... --no-record`, then two rate-limit reads `--wait` seconds apart
-  (180s default). Its verdict and evidence go to `logs/gap-anchor-test-*`.
+  (60s default). Its verdict and evidence go to `logs/gap-anchor-test-*`.
   Change one variable per run; an ANCHORED verdict closes the gap for ~5h.
   Skips the ping while a window is open unless `--force`.
 - `utils/codex_anchor_watch.py [--cron-time HH:MM] [--now]` — verifies a cron ping

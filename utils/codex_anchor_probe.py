@@ -3,8 +3,8 @@
 
 Every `yo <codex command>` run goes through probe(): a token-free rateLimits
 read before the ping (a second one 15s later only when the first is
-ambiguous), the production ping via `./yo ... --no-record`, then two reads
-180s apart. A real anchor locks resetsAt at ping+5h; without one resetsAt is a
+ambiguous), the production ping via `./yo ... --no-record`, then after a 10s
+settle two reads 60s apart. A real anchor locks resetsAt at ping+5h; without one resetsAt is a
 hypothetical that drifts with query time. Never judge anchoring from the Codex
 web UI (it hides windows at 0% usage).
 
@@ -31,7 +31,8 @@ WINDOW_SECS = 5 * 3600
 DRIFT_TOLERANCE_SECS = 5   # locked resetsAt jitters by ~2s server-side
 OPEN_WINDOW_MARGIN_SECS = 90  # hypothetical window reads ~now+5h; less means real
 PRE_WAIT_SECS = 15    # second pre-read, only when one read cannot tell idle from active
-POST_WAIT_SECS = 180  # between the two post-ping reads that decide the verdict
+SETTLE_SECS = 10      # after the ping, before the first post-read, so a late-registering anchor reads locked
+POST_WAIT_SECS = 60   # between the two post-ping reads that decide the verdict (drift 60s vs 5s tolerance)
 DEFAULT_PROMPT = "yo"  # mirrors yo's PROMPT default; the recorder needs the effective value
 OBSERVATION_ERRORS = (OSError, RuntimeError, ValueError, KeyError)
 
@@ -207,7 +208,8 @@ def session_usage(session_id):
     return None
 
 
-def probe(variant, command, log_file, pre_wait=PRE_WAIT_SECS, post_wait=POST_WAIT_SECS, force=False):
+def probe(variant, command, log_file, pre_wait=PRE_WAIT_SECS, settle=SETTLE_SECS,
+          post_wait=POST_WAIT_SECS, force=False):
     """One verified ping: pre-read, ping, two post-reads, verdict. No retry.
 
     Outcomes: window_open (a window was already live, nothing sent), anchored,
@@ -245,6 +247,7 @@ def probe(variant, command, log_file, pre_wait=PRE_WAIT_SECS, post_wait=POST_WAI
     result.update(ping_details(log_file, variant))
 
     try:
+        time.sleep(settle)
         for i in range(2):
             if i:
                 time.sleep(post_wait)

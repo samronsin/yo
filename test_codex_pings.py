@@ -69,7 +69,7 @@ class ProbeTests(ScratchCase):
 
     def test_read_failures_never_block_the_ping(self):
         failing = RuntimeError("no app-server")
-        result = self.check_probe([failing, failing], "observation_error", sleeps=[])
+        result = self.check_probe([failing, failing], "observation_error", sleeps=[10])
         self.assertEqual(result["pre_state"], "unknown")
         self.assertEqual(result["returncode"], 0)
         self.assertIn("no app-server", result["read_error"])
@@ -84,7 +84,7 @@ class ProbeTests(ScratchCase):
                 mock.patch.object(anchor.time, "time", side_effect=[90, 116, 120, 400, 401]):
             yield read, ping, sleep
 
-    def check_probe(self, reads, outcome, calls=1, rc=0, sleeps=(15, 180)):
+    def check_probe(self, reads, outcome, calls=1, rc=0, sleeps=(15, 10, 60)):
         variant = {"model": "gpt-5.6-terra", "effort": "medium", "thread_source": "", "prompt": "yo"}
         with self.probe_doubles(reads, rc) as (read, ping, sleep):
             result = anchor.probe(variant, "wrapper", self.root / "ping.log")
