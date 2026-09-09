@@ -91,14 +91,18 @@ def resolve_backend(command, backend):
         backend: The --backend value (a backend name), or None.
 
     Returns:
-        The resolved backend name; exits with an error if it can't be decided.
+        The resolved backend name.
+
+    Raises:
+        argparse.ArgumentTypeError: when it can't be decided; callers turn it
+            into their own usage error (yo's parser, install.py's exit).
     """
     if command in BACKENDS:
         if backend is not None and backend != command:
-            sys.exit(f"error: command '{command}' runs the {command} backend, but --backend {backend} was given; drop --backend or pass --backend {command}")
+            raise argparse.ArgumentTypeError(f"command '{command}' runs the {command} backend, but --backend {backend} was given; drop --backend or pass --backend {command}")
         return command
     if backend is None:
-        sys.exit(f"error: '{command}' is a custom command; pass --backend codex|claude")
+        raise argparse.ArgumentTypeError(f"'{command}' is a custom command; pass --backend codex|claude")
     return backend
 
 
@@ -237,7 +241,8 @@ def cron_path_for(commands):
         if location is None:
             sys.exit(
                 f"error: '{command}' not found as an executable on PATH; "
-                "scheduled commands must be wrapper scripts or binaries, not shell aliases"
+                "scheduled commands (and python3, which runs yo) must be wrapper "
+                "scripts or binaries, not shell aliases"
             )
         dirs.append(str(Path(location).parent))
     return ":".join(dict.fromkeys(dirs + BASE_CRON_PATH.split(":")))
@@ -439,8 +444,13 @@ def install_schedule(args):
         end += 24  # working hours wrap past midnight (e.g. night shift 22-6)
 
     command = args.command
-    backend = resolve_backend(command, args.backend)
-    cron_path = cron_path_for([command])  # resolves the command; errors if it's missing
+    try:
+        backend = resolve_backend(command, args.backend)
+    except argparse.ArgumentTypeError as exc:
+        sys.exit(f"error: {exc}")
+    # yo is a python3 script, so cron must find the interpreter as well as the
+    # command; both are resolved here and error out if missing.
+    cron_path = cron_path_for([command, "python3"])
     # Preflight: a malformed crontab should fail before the user approves anything.
     remove_managed_block(crontab, command)
 

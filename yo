@@ -1,112 +1,34 @@
-#!/usr/bin/env bash
-set -Eeuo pipefail
+#!/usr/bin/env python3
+"""Send a ping through Codex or Claude, optionally probing Codex's quota window."""
+import argparse
+import subprocess
+import sys
 
-ROOT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-PROMPT="yo"
+from install import BACKENDS, command_name, resolve_backend
+from utils import claude_runner, codex_runner
 
-usage() { echo "usage: $(basename "$0") <command> [--backend codex|claude] [--model MODEL] [--effort EFFORT] [--thread-source SOURCE] [--probe]" >&2; exit 2; }
 
-# Args: required first is the CLI command to invoke. It's either a canonical
-# backend name ("codex"/"claude", e.g. `yo claude`) or any command pointing at a
-# separate auth/config context ("codex-pro", "claude-perso"). --backend selects which
-# runner to apply and is required unless the command is itself a backend
-# name (then it's inferred), so the command name is free. COMMAND stays the
-# actual command invoked and the per-command log/crontab key, so several
-# coexist. Optional --model/--effort/--thread-source override the defaults
-# (codex only for the latter two). --probe (codex only) verifies the ping
-# against the account's quota reset and records the verdict in the run log;
-# install.py schedules Codex pings with it. Validate before logging so a
-# bad/missing arg fails fast to stderr.
-COMMAND="${1:-}"
-[[ -n "$COMMAND" && "$COMMAND" != -* ]] || usage
-shift
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument("command", type=command_name)
+    parser.add_argument("--backend", choices=BACKENDS)
+    for name in ("model", "effort", "thread-source"):
+        parser.add_argument(f"--{name}", default="")
+    parser.add_argument("--probe", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        args.backend = resolve_backend(args.command, args.backend)
+    except argparse.ArgumentTypeError as exc:
+        parser.error(str(exc))
+    if args.probe and args.backend != "codex":
+        parser.error("--probe is only supported with the codex backend (Claude exposes no quota window to verify against)")
+    runner = codex_runner if args.backend == "codex" else claude_runner
+    try:
+        return runner.run(args)
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        print(f"{args.command}: {exc}", file=sys.stderr)
+        return 2
 
-BACKEND=""
-MODEL=""
-EFFORT=""
-THREAD_SOURCE=""
-PROBE=false
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --backend)       [[ $# -ge 2 ]] || usage; BACKEND="$2"; shift 2 ;;
-    --model)         [[ $# -ge 2 ]] || usage; MODEL="$2"; shift 2 ;;
-    --effort)        [[ $# -ge 2 ]] || usage; EFFORT="$2"; shift 2 ;;
-    --thread-source) [[ $# -ge 2 ]] || usage; THREAD_SOURCE="$2"; shift 2 ;;
-    --probe)         PROBE=true; shift ;;
-    *)               usage ;;
-  esac
-done
 
-# Resolve the backend (mirrors install.py's resolve_backend): a command that is
-# itself a backend name is its own backend, and an explicit --backend must
-# agree with it -- a conflicting one is a usage error, not a silent run through
-# the wrong runner. Any other command needs --backend, since we can't tell which
-# runner flags to apply otherwise.
-case "$COMMAND" in
-  codex|claude)
-    if [[ -n "$BACKEND" && "$BACKEND" != "$COMMAND" ]]; then
-      echo "error: command '$COMMAND' runs the $COMMAND backend, but --backend $BACKEND was given; drop --backend or pass --backend $COMMAND" >&2; exit 2
-    fi
-    BACKEND="$COMMAND"
-    ;;
-  *)
-    [[ -n "$BACKEND" ]] || { echo "error: --backend (codex|claude) is required for command '$COMMAND'" >&2; exit 2; }
-    ;;
-esac
-case "$BACKEND" in
-  codex) ;;
-  claude)
-    if [[ "$PROBE" == true ]]; then
-      echo "error: --probe is only supported with the codex backend (Claude exposes no quota window to verify against)" >&2; exit 2
-    fi
-    ;;
-  *) echo "error: --backend must be 'codex' or 'claude', got '$BACKEND'" >&2; exit 2 ;;
-esac
-
-run_codex() {
-  # The Python runner owns Codex's invocation, logging, and optional probe.
-  local probe_args=()
-  [[ "$PROBE" == true ]] && probe_args=(--probe)
-  exec python3 "$ROOT_DIR/utils/codex_runner.py" "$COMMAND" \
-    --model "$MODEL" --effort "$EFFORT" --thread-source "$THREAD_SOURCE" \
-    ${probe_args[@]+"${probe_args[@]}"}
-}
-
-run_claude() {
-  local model="${MODEL:-haiku}" rc
-  local log_dir="$ROOT_DIR/logs" timestamp log_file last_message_file
-  last_message_file="$log_dir/yo-$COMMAND.last.txt"
-  mkdir -p "$log_dir"
-  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-  log_file="$log_dir/yo-$COMMAND-$timestamp.log"
-
-  {
-    echo "[$(date -Is)] yo start"
-    echo "root=$ROOT_DIR"
-
-    cd "$ROOT_DIR"
-
-    set +e
-    echo "agent=$COMMAND backend=claude model=$model"
-    # --print: non-interactive. An unpermitted tool call is denied, not prompted.
-    # stdout is the final message; capture it, then echo into the log, preserving
-    # Claude's exit code.
-    "$COMMAND" \
-      --print \
-      --model "$model" \
-      --output-format text \
-      --permission-mode default \
-      "$PROMPT" >"$last_message_file"
-    rc=$?
-    cat "$last_message_file"
-    set -e
-
-    echo "[$(date -Is)] yo end rc=$rc"
-    return "$rc"
-  } >>"$log_file" 2>&1
-}
-
-case "$BACKEND" in
-  codex) run_codex ;;
-  claude) run_claude ;;
-esac
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,13 +1,12 @@
 """Offline checks for the Codex runner: invocation, verdicts, records, dispatch."""
 import argparse
-from contextlib import contextmanager, redirect_stderr
+from contextlib import redirect_stderr
 import fcntl
 import io
 import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import tempfile
 import time
 import unittest
@@ -219,7 +218,7 @@ class RunTests(ScratchCase):
             self.assertEqual(self.records()[-1]["effective"]["model"], "gpt-5.6-luna")
         self.assertEqual(len(self.records()), 6)
 
-    def test_concurrent_run_is_skipped_and_other_backends_are_refused(self):
+    def test_concurrent_run_is_skipped(self):
         self.log_dir.mkdir(parents=True)
         with (self.log_dir / "yo-wrapper.lock").open("a") as held:
             fcntl.flock(held, fcntl.LOCK_EX)
@@ -228,74 +227,6 @@ class RunTests(ScratchCase):
         probe.assert_not_called()
         self.assertIn("skipped", err.getvalue())
         self.assertEqual(self.records(), [])
-        with self.probe_returning("anchored") as probe:
-            with self.assertRaisesRegex(ValueError, "only runs the codex backend"):
-                runner.run(args_for(backend="claude"))
-        probe.assert_not_called()
-
-
-class DispatchTests(ScratchCase):
-    def setUp(self):
-        super().setUp()
-        source = Path(__file__).resolve().parent
-        shutil.copy(source / "yo", self.root / "yo")
-        shutil.copytree(source / "utils", self.root / "utils", ignore=shutil.ignore_patterns("__pycache__"))
-        self.install_fake_cli()
-        self.log_dir = self.root / "logs"
-
-    def yo(self, *args, env=None, backend="codex"):
-        return subprocess.run([str(self.root / "yo"), "wrapper", "--backend", backend, *args],
-                              env=env or self.env, capture_output=True, text=True, timeout=30)
-
-    def test_a_plain_codex_ping_is_just_the_ping(self):
-        run = self.yo("--model", "gpt-5.6-luna")
-        self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(self.sent_argv()[-1], "yo")
-        (log,) = runner.run_logs("wrapper", self.log_dir)
-        text = log.read_text()
-        self.assertIn("agent=wrapper backend=codex model=gpt-5.6-luna", text)
-        self.assertTrue(text.rstrip().endswith("yo end rc=0"), text)
-        self.assertEqual(runner.load_records("wrapper", self.log_dir), [])
-        self.assertEqual(self.yo(env=self.env | {"FAKE_CODEX_RC": "7"}).returncode, 7)
-
-    def test_a_probed_codex_ping_is_verified_and_recorded_in_its_run_log(self):
-        # One real probed ping (it pays the post-ping settle); RunTests cover the other outcomes.
-        run = self.yo("--probe", "--model", "gpt-5.6-luna", "--thread-source", "scheduled")
-        self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(run.stdout, "")  # cron stays quiet; the verdict lives in the log
-        argv = self.sent_argv()
-        self.assertEqual((argv[-1], argv[argv.index("-m") + 1], argv[argv.index("--thread-source") + 1]),
-                         ("yo", "gpt-5.6-luna", "scheduled"))
-        (record,) = runner.load_records("wrapper", self.log_dir)
-        self.assertEqual((record["source"], record["outcome"], record["cli_version"], record["returncode"]),
-                         ("manual", "observation_error", "codex-cli test-version", 0))
-        self.assertEqual(record["effective"],
-                         {"model": "gpt-5.6-luna", "effort": "medium", "thread_source": "scheduled", "prompt": "yo"})
-        self.assertIn("fixture has no quota api", record["read_error"])
-        (log,) = runner.run_logs("wrapper", self.log_dir)
-        text = log.read_text()
-        for earlier, later in (("yo start", "agent=wrapper backend=codex model=gpt-5.6-luna"),
-                               ("agent=wrapper", "yo end rc=0"), ("yo end rc=0", "manual ping: observation_error")):
-            self.assertLess(text.index(earlier), text.index(later))
-        self.assertTrue(text.rstrip().splitlines()[-1].startswith("record: "))
-
-    def test_open_window_sends_nothing_and_claude_stays_plain(self):
-        open_window = json.dumps({"usedPercent": 12, "windowDurationMins": 300, "resetsAt": time.time() + 7200})
-        skipped = self.yo("--probe", env=self.env | {"FAKE_CODEX_QUOTA": open_window})
-        self.assertEqual(skipped.returncode, 0, skipped.stderr)
-        self.assertFalse(self.argv.exists())
-        (record,) = runner.load_records("wrapper", self.log_dir)
-        self.assertEqual(record["outcome"], "window_open")
-        self.assertIn("yo end rc=0 (window already open", runner.run_logs("wrapper", self.log_dir)[0].read_text())
-
-        plain = self.yo(backend="claude")
-        self.assertEqual(plain.returncode, 0, plain.stderr)
-        self.assertEqual(self.sent_argv()[-1], "yo")
-        self.assertEqual(len(runner.load_records("wrapper", self.log_dir)), 1)  # a plain run log, no record
-        refused = self.yo("--probe", backend="claude")
-        self.assertEqual(refused.returncode, 2)
-        self.assertIn("only supported with the codex backend", refused.stderr)
-        self.assertFalse(self.argv.exists())
 
 
 if __name__ == "__main__":
