@@ -20,9 +20,9 @@ import subprocess
 import sys
 
 if __package__:
-    from .codex_anchor_probe import ROOT_DIR, probe
+    from .codex_anchor_probe import ROOT_DIR, WINDOW_SECS, five_hour_read, probe, read_limits_payload, window_reads
 else:
-    from codex_anchor_probe import ROOT_DIR, probe
+    from codex_anchor_probe import ROOT_DIR, WINDOW_SECS, five_hour_read, probe, read_limits_payload, window_reads
 
 SCHEMA = 1
 BACKEND = "codex"  # the only backend with a quota observer
@@ -150,9 +150,34 @@ def cli_version(command):
     return found.group(0) if found else (text or None)
 
 
+def quota(command):
+    """Read quota windows via app-server, resolving ambiguous 5h state with window_reads()."""
+    payload = read_limits_payload(command=command)
+    out = {"five_hour": None, "weekly": []}
+    try:
+        reads = [five_hour_read(payload)]
+    except RuntimeError:  # no 5h window in the payload (seen 2026-08-08 to 08-24)
+        reads = []
+    if reads:
+        state = window_reads(command, reads)
+        last = reads[-1]
+        out["five_hour"] = {"state": state, "used_percent": last["used_percent"],
+                            "resets_at": last["resets_at"], "reads": reads,
+                            "anchored_at": last["resets_at"] - WINDOW_SECS if state == "active" else None}
+    for slot in ("primary", "secondary"):
+        limit = payload.get(slot)
+        if isinstance(limit, dict) and limit.get("windowDurationMins") != WINDOW_SECS // 60:
+            out["weekly"].append({"window_minutes": limit.get("windowDurationMins"),
+                                  "used_percent": limit.get("usedPercent"),
+                                  "resets_at": limit.get("resetsAt")})
+    return out
+
+
 def run_logs(command, log_dir=None):
-    """This command's run logs, oldest first (the name carries the UTC timestamp)."""
-    return sorted((log_dir or ROOT_DIR / "logs").glob(f"yo-{command}-*.log"))
+    """Exact command's timestamped run logs, oldest first; exclude wrappers sharing its prefix."""
+    name = re.compile(rf"yo-{re.escape(command)}-\d{{8}}T\d{{6}}Z\.log")
+    return sorted(path for path in (log_dir or ROOT_DIR / "logs").glob(f"yo-{command}-*.log")
+                  if name.fullmatch(path.name))
 
 
 def load_records(command, log_dir=None):
@@ -215,4 +240,3 @@ def run(args):
         if record["outcome"] == "execution_error":
             return record.get("returncode") or 2
         return EXIT_CODES.get(record["outcome"], 2)
-

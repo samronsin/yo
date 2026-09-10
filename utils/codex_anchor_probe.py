@@ -41,7 +41,12 @@ def utc(ts: float) -> str:
 
 
 def read_rate_limits(timeout: float = 30.0, command: str = "codex") -> dict:
-    """Read account rate limits via `codex app-server` (spends no tokens)."""
+    """The 5h window's read, {"read_at", "resets_at", "used_percent"} (spends no tokens)."""
+    return five_hour_read(read_limits_payload(timeout, command))
+
+
+def read_limits_payload(timeout: float = 30.0, command: str = "codex") -> dict:
+    """The account's whole rateLimits object via `codex app-server` (spends no tokens)."""
     proc = subprocess.Popen(
         [command, "app-server"],
         stdin=subprocess.PIPE,
@@ -82,18 +87,22 @@ def read_rate_limits(timeout: float = 30.0, command: str = "codex") -> dict:
                     result = msg.get("result")
                     if not isinstance(result, dict) or not isinstance(result.get("rateLimits"), dict):
                         raise RuntimeError(f"unexpected rateLimits response: {line[:200]!r}")
-                    window = five_hour_window(result["rateLimits"])
-                    reset = window.get("resetsAt")
-                    if (isinstance(reset, bool) or not isinstance(reset, (int, float))
-                            or not math.isfinite(reset)):
-                        raise RuntimeError("missing or invalid quota reset timestamp")
-                    return {"read_at": time.time(), "resets_at": reset,
-                            "used_percent": window.get("usedPercent")}
+                    return result["rateLimits"]
     finally:
         proc.kill()
         proc.wait()
         proc.stdin.close()
         proc.stdout.close()
+
+
+def five_hour_read(rate_limits) -> dict:
+    """Reduce a rateLimits payload to the 5h window's read, stamped with the read time."""
+    window = five_hour_window(rate_limits)
+    reset = window.get("resetsAt")
+    if (isinstance(reset, bool) or not isinstance(reset, (int, float))
+            or not math.isfinite(reset)):
+        raise RuntimeError("missing or invalid quota reset timestamp")
+    return {"read_at": time.time(), "resets_at": reset, "used_percent": window.get("usedPercent")}
 
 
 def five_hour_window(rate_limits):
@@ -145,6 +154,25 @@ def quick_state(read):
     return None
 
 
+def window_reads(command, reads, pre_wait=PRE_WAIT_SECS):
+    """Settle the window state with as few reads as possible, appending to `reads`.
+
+    Starts from what `reads` already holds (a first read, or nothing) and takes
+    a second read `pre_wait` later only when one read cannot tell a fresh
+    window from the drifting hypothetical reset an idle account reports (see
+    quick_state). Returns "active", "idle" or "unknown"; the reads stay in the
+    list so callers can keep them as evidence even if a later read raises.
+    """
+    if not reads:
+        reads.append(read_rate_limits(command=command))
+    state = quick_state(reads[0])
+    if state is None:
+        time.sleep(pre_wait)
+        reads.append(read_rate_limits(command=command))
+        state = window_state(reads)
+    return state
+
+
 def probe(send, command, pre_wait=PRE_WAIT_SECS, settle=SETTLE_SECS,
           post_wait=POST_WAIT_SECS, force=False):
     """One verified ping: pre-read, ping, two post-reads, verdict. No retry.
@@ -161,12 +189,7 @@ def probe(send, command, pre_wait=PRE_WAIT_SECS, settle=SETTLE_SECS,
     """
     result = {"started_at": time.time(), "pre": [], "reads": [], "outcome": "inconclusive"}
     try:
-        result["pre"].append(read_rate_limits(command=command))
-        state = quick_state(result["pre"][0])
-        if state is None:
-            time.sleep(pre_wait)
-            result["pre"].append(read_rate_limits(command=command))
-            state = window_state(result["pre"])
+        state = window_reads(command, result["pre"], pre_wait)
     except OBSERVATION_ERRORS as exc:
         state = "unknown"
         result["read_error"] = str(exc)

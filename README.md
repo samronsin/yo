@@ -46,6 +46,9 @@ the hours or commands, or `./install.py --remove claude` to stop. See
   Codex invocation and, with `--probe`, verifies and records the ping.
 - **`utils/claude_runner.py`** — the Claude backend: sends a plain ping and
   writes its output and exit status to the run log.
+- **`utils/status.py`** — `yo <command> --status`: the account's quota
+  windows and the last run, read token-free through each CLI (see
+  [Quota status](#quota-status)).
 - **`tests/`** — the test suite (`python3 -m unittest` from the repo root).
 
 ## Usage
@@ -57,6 +60,35 @@ Run once, ad hoc:
 ./yo claude                   # Claude, default model (Haiku)
 ./yo claude --model opus      # Claude with an explicit model
 ```
+
+### Quota status
+
+`--status` reads quota windows through the CLI and shows the last run.
+It accepts the same command and `--backend` as a ping, but no ping flags:
+
+```sh
+./yo codex --status                       # Codex login, via `codex app-server`
+./yo claude-pro --backend claude --status # Claude wrapper, via headless `/usage`
+```
+
+```
+codex (codex), read 2026-09-10 13:44 CEST
+  5h window   open, 12% used, anchored 11:30, resets 2026-09-10 16:30 CEST (2h46m left)
+  weekly      31% used, resets 2026-09-14 09:00 CEST
+  last run    2026-09-10 06:00 CEST, anchored (default), rc=0, /srv/yo/logs/yo-codex-20260910T040004Z.log
+```
+
+- **Codex** uses the probe's token-free quota read. An ambiguous 5h window
+  needs a second read after 15 seconds to distinguish `open` from `idle`.
+- **Claude** uses headless `/usage` (zero model turns on Claude Code 2.1.265;
+  a warning appears if a version spends turns). Positive usage means `open`;
+  zero is ambiguous. Unrecognized reset dates are shown as printed by the CLI.
+- **Anchored** is the reset minus five hours. Claude's minute-precision resets
+  are too coarse for `--probe`, which remains Codex-only.
+- **Last run** shows the newest log for the exact command: start time, exit
+  status, and probe verdict when available.
+
+Exit status is `0` on a successful quota read, or `1` with an error in the report.
 
 ### Recorded Codex pings
 
@@ -100,9 +132,10 @@ grep -h '^record: ' logs/yo-codex-*.log | sed 's/^record: //' | python3 -m json.
 ```
 
 `install.py` emits `--probe` on Codex lines by default, so the block you
-confirm shows it; pass `--no-probe` to schedule plain pings instead. Claude has
-no quota window to verify against, so `--probe` is refused there and never
-scheduled.
+confirm shows it; pass `--no-probe` to schedule plain pings instead. Claude's
+only token-free quota read (`/usage`, see [Quota status](#quota-status)) has
+minute precision, too coarse for the locked-vs-drifting test, so `--probe` is
+refused there and never scheduled.
 
 Install a schedule (review the snippet, confirm, and it's added to your crontab).
 One command per run — for several, run it once each:
@@ -121,6 +154,9 @@ To see what's installed, with each command's run times and log location:
 ```sh
 ./install.py --status
 ```
+
+For what the account's quota looks like right now, see
+[Quota status](#quota-status) (`./yo <command> --status`).
 
 To stop a command, remove its block (review it, confirm, and it's gone). Only
 that block goes; other commands' blocks and your own crontab lines stay:
