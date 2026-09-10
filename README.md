@@ -77,7 +77,7 @@ ping, and none of the ping's other flags:
 ```
 codex (codex), read 2026-09-10 13:44 CEST
   5h window   open, 12% used, anchored 11:30, resets 2026-09-10 16:30 CEST (2h46m left)
-  7d window   31% used, resets 2026-09-14 09:00 CEST
+  weekly      31% used, resets 2026-09-14 09:00 CEST
   last run    2026-09-10 06:00 CEST, anchored (default), rc=0, /srv/yo/logs/yo-codex-20260910T040004Z.log
 ```
 
@@ -90,9 +90,11 @@ codex (codex), read 2026-09-10 13:44 CEST
 - **Claude** runs `<command> --print --output-format json "/usage"`, which
   Claude Code answers without a model turn (its result envelope reports zero
   turns and zero tokens). The view is prose, so `yo` parses the session and
-  weekly lines and keeps the reset times as Claude prints them: minute
-  precision, in the machine's timezone. That is enough for status but too
-  coarse for anchoring verdicts, which is why `--probe` stays Codex-only.
+  weekly lines (one per model scope) and renders them in the same shape as
+  Codex's; a reset time it cannot parse is shown as Claude printed it. Claude
+  reports no open/idle flag: usage above 0% proves a live window, at 0% the
+  row says so. Its reset times have minute precision, enough for status but
+  too coarse for anchoring verdicts, which is why `--probe` stays Codex-only.
 - **last run** is the newest `yo-<command>-*.log`: when it started, its exit
   status, and the probe verdict when it has one.
 

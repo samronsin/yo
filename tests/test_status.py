@@ -2,11 +2,13 @@
 from contextlib import redirect_stderr, redirect_stdout
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
+from datetime import datetime
 import io
 import json
 import os
 import time
 import unittest
+from zoneinfo import ZoneInfo
 from unittest import mock
 
 from tests.helpers import REPO_ROOT, ScratchCase
@@ -87,7 +89,9 @@ class ClaudeQuotaTests(FakeCliCase):
         with self.with_env():
             quota = claude_runner.quota("wrapper")
         self.assertEqual(self.sent_argv(), claude_runner.USAGE_ARGS)
-        self.assertEqual(quota["five_hour"], {"used_percent": 18, "resets": "Sep 10 at 4:30pm (Europe/Paris)"})
+        self.assertEqual(quota["five_hour"]["used_percent"], 18)
+        self.assertEqual(quota["five_hour"]["resets"], "Sep 10 at 4:30pm (Europe/Paris)")
+        self.assertIsInstance(quota["five_hour"]["resets_at"], float)
         self.assertEqual([(w["scope"], w["used_percent"]) for w in quota["weekly"]],
                          [("all models", 26), ("Fable", 49)])
         self.assertEqual(quota["weekly"][1]["resets"], "Sep 14 at 5am (Europe/Paris)")
@@ -97,7 +101,8 @@ class ClaudeQuotaTests(FakeCliCase):
         with self.with_env(FAKE_CLAUDE_USAGE="Current week (all models): 2.5% used - resets soon\n"):
             quota = claude_runner.quota("wrapper")
         self.assertIsNone(quota["five_hour"])
-        self.assertEqual(quota["weekly"], [{"scope": "all models", "used_percent": 2.5, "resets": "soon"}])
+        self.assertEqual(quota["weekly"], [{"scope": "all models", "used_percent": 2.5, "resets": "soon",
+                                            "resets_at": None}])
         with self.with_env(FAKE_CLAUDE_USAGE="/usage isn't available in this environment.\n"), \
                 self.assertRaisesRegex(RuntimeError, "unrecognized /usage output: \"/usage isn't"):
             claude_runner.quota("wrapper")
@@ -108,7 +113,33 @@ class ClaudeQuotaTests(FakeCliCase):
         with self.with_env(FAKE_CLAUDE_TURNS="1"):
             out = status.report("wrapper", "claude")
         self.assertEqual(out["quota"]["spent_turns"], 1)
-        self.assertIn("warning     the /usage call spent 1 model turn", status.format_report(out))
+        self.assertRegex(status.format_report(out), r"\n  warning +the /usage call spent 1 model turn")
+
+
+class ParseResetTests(unittest.TestCase):
+    NOW = 1789040640.0  # 2026-09-10T11:44:00Z
+
+    def test_known_shapes_resolve_to_the_nearest_year(self):
+        paris = ZoneInfo("Europe/Paris")
+        cases = {"Sep 10 at 4:30pm (Europe/Paris)": (2026, 9, 10, 16, 30),
+                 "Sep 14 at 5am (Europe/Paris)": (2026, 9, 14, 5, 0),
+                 "Jan 2 at 12am (Europe/Paris)": (2027, 1, 2, 0, 0),  # ahead of a September read: next year
+                 "Dec 30 at 12pm (Europe/Paris)": (2026, 12, 30, 12, 0)}  # ahead too, still this year
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(claude_runner.parse_reset(text, now=self.NOW),
+                                 datetime(*expected, tzinfo=paris).timestamp())
+        january = datetime(2027, 1, 5, tzinfo=paris).timestamp()  # a stale reset read just after New Year
+        self.assertEqual(claude_runner.parse_reset("Dec 30 at 12pm (Europe/Paris)", now=january),
+                         datetime(2026, 12, 30, 12, 0, tzinfo=paris).timestamp())
+        self.assertEqual(claude_runner.parse_reset("Sep 10 at 4:30pm (UTC)", now=self.NOW),
+                         datetime(2026, 9, 10, 16, 30, tzinfo=ZoneInfo("UTC")).timestamp())
+
+    def test_unknown_shapes_give_none(self):
+        for text in ("soon", "Sep 10 at 16:30 (Europe/Paris)", "Sep 10 at 4:30pm (Mars/Olympus)",
+                     "Xyz 10 at 4:30pm (Europe/Paris)", ""):
+            with self.subTest(text=text):
+                self.assertIsNone(claude_runner.parse_reset(text, now=self.NOW))
 
 
 class LastRunTests(ScratchCase):
@@ -152,7 +183,7 @@ class FormatTests(unittest.TestCase):
                      "outcome": "anchored", "source": "default"})
         self.assertIn("5h window   open, 12% used, anchored ", text)
         self.assertIn("(2h46m left)", text)
-        self.assertIn("7d window   31% used, resets ", text)
+        self.assertIn("weekly      31% used, resets ", text)
         self.assertIn("anchored (default), rc=0, logs/yo-wrapper-x.log", text)
         idle = self.render("codex", {"five_hour": {"state": "idle", "used_percent": 0, "resets_at": self.NOW - 5,
                                                    "anchored_at": None, "reads": []}, "weekly": []})
@@ -161,19 +192,28 @@ class FormatTests(unittest.TestCase):
         unknown = self.render("codex", {"five_hour": {"state": "unknown", "used_percent": None, "resets_at": self.NOW,
                                                       "anchored_at": None, "reads": []},
                                         "weekly": [{"window_minutes": None, "used_percent": None, "resets_at": None}]})
-        self.assertIn("could not tell from two reads, ?% used, reports reset ", unknown)
+        self.assertIn("open or idle? cannot tell, ?% used, reports reset ", unknown)
         self.assertIn("other window ?% used, resets ?", unknown)
         self.assertIn("5h window   not reported by the account", self.render("codex", {"five_hour": None, "weekly": []}))
 
-    def test_claude_and_errors(self):
+    def test_claude_rows_match_codex_shape(self):
+        resets = self.NOW + 2 * 3600 + 46 * 60
         text = self.render("claude", {
-            "five_hour": {"used_percent": 18, "resets": "Sep 10 at 4:30pm (Europe/Paris)"},
-            "weekly": [{"scope": "all models", "used_percent": 26, "resets": "Sep 14 at 5am (Europe/Paris)"}],
+            "five_hour": {"used_percent": 18, "resets": "raw", "resets_at": resets},
+            "weekly": [{"scope": "all models", "used_percent": 26, "resets": "raw", "resets_at": self.NOW + 4 * 86400},
+                       {"scope": "Fable", "used_percent": 49, "resets": "unparsed text", "resets_at": None}],
             "spent_turns": 0, "cost_usd": 0,
         }, last_run={"log": "logs/yo-wrapper-x.log", "returncode": None, "started_at": None})
-        self.assertIn("5h window           18% used, resets Sep 10 at 4:30pm (Europe/Paris)", text)
-        self.assertIn("weekly (all models) 26% used, resets Sep 14 at 5am (Europe/Paris)", text)
-        self.assertIn("last run    unknown time, still running or crashed, logs/yo-wrapper-x.log", text)
+        self.assertIn("5h window      open, 18% used, anchored ", text)
+        self.assertIn("(2h46m left)", text)
+        self.assertIn("\n  weekly         26% used, resets 2026-09-1", text)  # padded to the widest label
+        self.assertIn("weekly (Fable) 49% used, resets unparsed text", text)
+        self.assertIn("last run       unknown time, still running or crashed, logs/yo-wrapper-x.log", text)
+        zero = self.render("claude", {"five_hour": {"used_percent": 0, "resets": "Sep 10 at 4pm (X)", "resets_at": None},
+                                      "weekly": [], "spent_turns": 0, "cost_usd": 0})
+        self.assertIn("5h window   open or idle? cannot tell, 0% used, resets Sep 10 at 4pm (X)", zero)
+
+    def test_errors(self):
         self.assertIn("quota       unavailable: no app-server", self.render("codex", None, error="no app-server"))
 
 
@@ -190,12 +230,13 @@ class DispatchTests(FakeCliCase):
         rc, text = self.invoke("wrapper", "--backend", "claude", "--status")
         self.assertEqual(rc, 0)
         self.assertTrue(text.startswith("wrapper (claude), read "))
-        self.assertIn("5h window           18% used", text)  # padded to the widest label
+        self.assertIn("5h window      open, 18% used, anchored ", text)  # padded to the widest label
+        self.assertIn("\n  weekly (Fable) 49% used, resets 20", text)
         self.assertEqual(self.sent_argv(), claude_runner.USAGE_ARGS)
         rc, text = self.invoke("wrapper", "--status", "--backend", "codex")
         self.assertEqual(rc, 0)
         self.assertIn("5h window   open, 12% used", text)
-        self.assertIn("7d window   31% used", text)
+        self.assertIn("weekly      31% used", text)
         self.assertFalse(self.argv.exists())  # nothing was sent
         self.assertEqual(codex_runner.run_logs("wrapper", self.log_dir), [])  # and no run log written
 

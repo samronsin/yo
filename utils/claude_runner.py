@@ -1,7 +1,9 @@
 """yo's Claude backend: send a plain ping (run) or read the account's quota windows (quota)."""
+import datetime
 import json
 import re
 import subprocess
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 if __package__:
     from . import codex_runner as shared
@@ -59,12 +61,44 @@ def _number(text):
     return int(value) if value.is_integer() else value
 
 
+# "Sep 10 at 4:30pm (Europe/Paris)", "Sep 14 at 5am (Europe/Paris)": month-day,
+# 12h clock with optional minutes, IANA zone in parentheses. No year.
+RESET_RE = re.compile(r"^([A-Z][a-z]{2}) (\d{1,2}) at (\d{1,2})(?::(\d{2}))?(am|pm) \((\S+)\)$")
+
+
+def parse_reset(text, now=None):
+    """The epoch time of a /usage reset string, or None when it is not in the known shape.
+
+    The string carries no year, so the one that puts the reset closest to `now`
+    is used (a late-December read of a January reset lands in the next year).
+    """
+    m = RESET_RE.match(text.strip())
+    if not m:
+        return None
+    try:
+        zone = ZoneInfo(m[6])
+        month = datetime.datetime.strptime(m[1], "%b").month
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+    hour = int(m[3]) % 12 + (12 if m[5] == "pm" else 0)
+    now = datetime.datetime.now(zone) if now is None else datetime.datetime.fromtimestamp(now, zone)
+    candidates = []
+    for year in (now.year - 1, now.year, now.year + 1):
+        try:
+            candidates.append(datetime.datetime(year, month, int(m[2]), hour, int(m[4] or 0), tzinfo=zone))
+        except ValueError:  # Feb 29 in a non-leap year
+            continue
+    return min(candidates, key=lambda dt: abs(dt - now)).timestamp() if candidates else None
+
+
 def quota(command):
     """The account's quota windows from `<command> --print /usage`, for `yo --status`.
 
-    Returns {"five_hour": {"used_percent", "resets"} or None, "weekly": [{"scope",
-    "used_percent", "resets"}...], "spent_turns", "cost_usd"}. Raises RuntimeError
-    when the CLI fails or its output is not the /usage view.
+    Returns {"five_hour": {"used_percent", "resets", "resets_at"} or None, "weekly":
+    [{"scope", "used_percent", "resets", "resets_at"}...], "spent_turns", "cost_usd"},
+    where "resets" is the text as printed and "resets_at" its epoch time when the
+    text parses (see parse_reset). Raises RuntimeError when the CLI fails or its
+    output is not the /usage view.
     """
     proc = subprocess.run([command, *USAGE_ARGS], stdin=subprocess.DEVNULL, capture_output=True,
                           text=True, timeout=USAGE_TIMEOUT_SECS, cwd=shared.ROOT_DIR)
@@ -83,10 +117,12 @@ def quota(command):
     if not session and not weeks:
         first = text.strip().splitlines()[0] if text.strip() else ""
         raise RuntimeError(f"unrecognized /usage output: {first[:120]!r}")
+    def window(used, resets, **extra):
+        return {"used_percent": _number(used), "resets": resets, "resets_at": parse_reset(resets), **extra}
+
     return {
-        "five_hour": {"used_percent": _number(session[1]), "resets": session[2]} if session else None,
-        "weekly": [{"scope": scope, "used_percent": _number(used), "resets": resets}
-                   for scope, used, resets in weeks],
+        "five_hour": window(session[1], session[2]) if session else None,
+        "weekly": [window(used, resets, scope=scope) for scope, used, resets in weeks],
         "spent_turns": envelope.get("num_turns", 0),
         "cost_usd": envelope.get("total_cost_usd"),
     }
