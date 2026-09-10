@@ -1,25 +1,8 @@
 """Per-user settings and state: ~/.yo/settings.ini and ~/.yo/logs/.
 
-A setting's scope is the scope of what it describes. Logins, hours and
-timezone are per user, like the crontab, so they live in the home rather than
-the checkout; the logs and locks yo writes go beside them, which lets one
-read-only checkout serve several users, each with their own ~/.yo/.
-
-The file is INI (configparser): one section per command, [DEFAULT] for the
-host-wide values a section may override.
-
-    [DEFAULT]
-    tz = Europe/Paris
-    hours = 9-18
-    window_hours = 5
-    num_windows = 3
-
-    [codex-pro]
-    backend = codex
-
-install.py writes it (flags given win over the file and are persisted), yo
-reads it (backend, model/effort/thread_source overrides, tz). Values are
-strings; callers convert. Comments are lost when install.py rewrites the file.
+INI sections register commands and inherit [DEFAULT]. install.py persists
+settings; yo reads them. Values are strings; callers convert. Rewrites lose
+comments. See README.md for the format and precedence rules.
 """
 import configparser
 from pathlib import Path
@@ -71,21 +54,6 @@ def dump(parser):
     return out.getvalue()
 
 
-def commands(parser):
-    """Registered command names, in file order."""
-    return parser.sections()
-
-
-def command_settings(parser, command):
-    """`command`'s effective settings (its section over [DEFAULT]) as a dict, None if unregistered."""
-    return dict(parser[command]) if parser.has_section(command) else None
-
-
-def defaults(parser):
-    """[DEFAULT] as a dict."""
-    return dict(parser[DEFAULT_SECTION])
-
-
 def to_bool(text):
     return str(text).strip().lower() in ("1", "true", "yes", "on")
 
@@ -115,11 +83,6 @@ def update_command(parser, command, values):
             parser.remove_option(command, key)
         else:
             section[key] = text
-
-
-def remove_command(parser, command):
-    """Drop `command`'s section; True if there was one."""
-    return parser.remove_section(command)
 
 
 def format_value(value):

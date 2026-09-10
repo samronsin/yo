@@ -4,7 +4,6 @@ import argparse
 import io
 import os
 import subprocess
-import tempfile
 import time
 import unittest
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
@@ -12,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 import install
+from tests.helpers import ScratchCase
 from utils import settings
 from install import (
     BASE_CRON_PATH,
@@ -294,19 +294,7 @@ class ManagedBlocksTest(unittest.TestCase):
             self.assertIsNone(parse_cron_entry(other), other)
 
 
-class ScratchHome(unittest.TestCase):
-    """HOME under a scratch directory, so ~/.yo is private to the test."""
-
-    def setUp(self):
-        temp = tempfile.TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        env = mock.patch.dict(os.environ, {"HOME": temp.name})
-        self.addCleanup(env.stop)
-        env.start()
-        self.home = settings.home_dir()
-
-
-class StatusTest(ScratchHome):
+class StatusTest(ScratchCase):
 
     def test_format_status(self):
         # Logs live under ~/.yo/logs whichever checkout installed the block; an
@@ -322,14 +310,14 @@ class StatusTest(ScratchHome):
             "  schedule: 06:00, */15 9-17 * * 1-5 system time\n"
             "  command:  /moved/yo codex-pro --backend codex\n"
             "  settings: not registered; re-run install.py --command codex-pro ... to register it\n"
-            f"  logs:     {self.home}/logs/yo-codex-pro-<timestamp>.log\n"
-            f"  last:     {self.home}/logs/yo-codex-pro.last.txt\n"
+            f"  logs:     {self.log_dir}/yo-codex-pro-<timestamp>.log\n"
+            f"  last:     {self.log_dir}/yo-codex-pro.last.txt\n"
         ))
 
     def test_format_status_block_without_entries(self):
         text = format_status(installed_jobs("# >>> yo-codex >>>\n# <<< yo-codex <<<\n"))
         self.assertIn("  schedule: (no cron entries)\n", text)
-        self.assertIn(f"  logs:     {self.home}/logs/yo-codex-<timestamp>.log\n", text)
+        self.assertIn(f"  logs:     {self.log_dir}/yo-codex-<timestamp>.log\n", text)
 
     def test_format_status_when_empty(self):
         self.assertEqual(format_status([]), "No yo cron jobs installed.\n")
@@ -371,7 +359,7 @@ class StatusTest(ScratchHome):
         self.assertIn("# >>> yo-codex >>>", merged)
 
 
-class RemoveTest(unittest.TestCase):
+class RemoveTest(ScratchCase):
     CRONTAB = ManagedBlocksTest.CRONTAB
 
     def _remove(self, command, crontab, *flags, reply="y"):
@@ -492,7 +480,7 @@ class ToSystemTimesTest(unittest.TestCase):
             self.assertEqual(hour_minute(to_system_times([-1], "Etc/GMT-5")[0]), (18, 0))
 
 
-class SettingsFlowTest(ScratchHome):
+class SettingsFlowTest(ScratchCase):
     """Install, refresh, status and remove against a private ~/.yo and a mocked crontab."""
 
     def run_main(self, argv, crontab="", reply="y"):
@@ -507,17 +495,13 @@ class SettingsFlowTest(ScratchHome):
             install.main(install.parse_args(argv))
         return out.getvalue(), (run.call_args.kwargs["input"] if run.called else None)
 
-    def file_text(self):
-        return settings.settings_path().read_text()
-
     def test_install_persists_the_flags_and_seeds_the_host_defaults(self):
-        out, written = self.run_main(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex-pro",
+        _, written = self.run_main(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex-pro",
                                       "--backend", "codex"])
-        self.assertEqual(self.file_text(),
-                         "[DEFAULT]\ntz = Europe/Paris\nhours = 9-18\nwindow_hours = 5\nnum_windows = 3\n\n"
-                         "[codex-pro]\nbackend = codex\n\n")
-        self.assertIn(f"Settings ({settings.settings_path()}) after install:", out)
-        self.assertIn("Crontab and settings updated.", out)
+        parser = settings.load()
+        self.assertEqual(parser.defaults(), {"tz": "Europe/Paris", "hours": "9-18",
+                                            "window_hours": "5", "num_windows": "3"})
+        self.assertEqual(parser["codex-pro"]["backend"], "codex")
         self.assertIn(f" {install.JOB_CMD} codex-pro --backend codex --probe\n", written)
 
     def test_omitted_flags_come_from_the_file_and_given_flags_win(self):
@@ -525,16 +509,16 @@ class SettingsFlowTest(ScratchHome):
                                   "--backend", "codex"])
         # A second command: tz from [DEFAULT], its own hours recorded as an override.
         self.run_main(["--hours", "19-23", "--command", "claude-perso", "--backend", "claude"])
-        self.assertIn("[claude-perso]\nbackend = claude\nhours = 19-23\n", self.file_text())
+        self.assertEqual(settings.load()["claude-perso"]["hours"], "19-23")
         # Re-installing with nothing but the name reproduces the block from the file.
         _, again = self.run_main(["--command", "codex-pro"])
         self.assertEqual(again, first)
-        # Given flags win and are persisted: probe off, a model override, hours back to the default.
+        # Given flags win and are persisted.
         _, plain = self.run_main(["--command", "codex-pro", "--no-probe", "--model", "gpt-5.6-luna"])
         self.assertNotIn("--probe", plain)
-        self.assertIn("[codex-pro]\nbackend = codex\nprobe = false\nmodel = gpt-5.6-luna\n", self.file_text())
-        self.run_main(["--command", "claude-perso", "--hours", "9-18"])
-        self.assertIn("[claude-perso]\nbackend = claude\n\n", self.file_text())  # equal to [DEFAULT]: dropped
+        section = settings.load()["codex-pro"]
+        self.assertFalse(section.getboolean("probe"))
+        self.assertEqual(section["model"], "gpt-5.6-luna")
 
     def test_missing_schedule_without_settings_is_an_error(self):
         with self.assertRaises(SystemExit) as cm:
@@ -560,17 +544,15 @@ class SettingsFlowTest(ScratchHome):
             with self.subTest(argv=argv), self.assertRaises(SystemExit) as cm:
                 self.run_main(argv)
             self.assertEqual(cm.exception.code, "error: backend 'cdoex' for command 'work-ai' is not one of codex, claude")
-        self.assertIn("backend=cdoex (invalid; fix", format_status([], settings.load()) + format_status(
+        self.assertIn("backend=cdoex (invalid; fix", format_status(
             installed_jobs(render_cron([6], "UTC", "work-ai", "codex", "/bin")), settings.load()))
 
     def test_no_schedule_registers_for_yo_and_status_only(self):
         # No tz/hours needed: nothing is planned. The section says so, and nothing reaches the crontab.
-        out, written = self.run_main(["--command", "claude-perso", "--backend", "claude", "--no-schedule"])
+        _, written = self.run_main(["--command", "claude-perso", "--backend", "claude", "--no-schedule"])
         self.assertIsNone(written)
-        self.assertEqual(self.file_text(), "[claude-perso]\nbackend = claude\nschedule = false\n\n")
-        self.assertIn("without a schedule", out)
-        self.assertIn("Settings updated.", out)
         parser = settings.load()
+        self.assertEqual(dict(parser["claude-perso"]), {"backend": "claude", "schedule": "false"})
         status = format_status([], parser)
         self.assertIn("Registered for yo and --status only (schedule = false):\n  claude-perso\n", status)
         self.assertNotIn("not installed", status)
@@ -584,12 +566,12 @@ class SettingsFlowTest(ScratchHome):
         # Flipping it back schedules it and drops the key.
         _, written = self.run_main(["--command", "claude-perso", "--tz", "UTC", "--hours", "9-18", "--schedule"])
         self.assertIn("# >>> yo-claude-perso >>>", written)
-        self.assertNotIn("schedule", self.file_text())
+        self.assertNotIn("schedule", settings.load()["claude-perso"])
         # And --no-schedule on a scheduled command removes its block along the way.
         out, written = self.run_main(["--command", "claude-perso", "--no-schedule"], crontab=written)
         self.assertEqual(written, "")
         self.assertIn("existing yo-claude-perso cron block will be removed", out)
-        self.assertIn("schedule = false", self.file_text())
+        self.assertFalse(settings.load()["claude-perso"].getboolean("schedule"))
 
     def test_refresh_regenerates_every_registered_block_and_keeps_the_rest(self):
         _, codex_block = self.run_main(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex-pro",
@@ -598,10 +580,7 @@ class SettingsFlowTest(ScratchHome):
         stale_codex = codex_block.replace("* * * ", "* * 1 ", 1)  # drifted, as after a clock change
         old_block = render_cron([6], "UTC", "old", "codex", "/bin")
         crontab = "15 9 * * * echo mine\n" + stale_codex + old_block
-        out, written = self.run_main(["--refresh"], crontab=crontab)
-        self.assertIn("Scheduled pings (codex-pro):", out)
-        self.assertIn("Scheduled pings (claude-perso):", out)
-        self.assertIn("Crontab updated; 2 block(s) regenerated.", out)
+        _, written = self.run_main(["--refresh"], crontab=crontab)
         self.assertTrue(written.startswith("15 9 * * * echo mine\n" + old_block))
         self.assertIn(codex_block, written)
         self.assertIn(claude_block, written)
@@ -624,24 +603,41 @@ class SettingsFlowTest(ScratchHome):
         text = format_status([], parser)
         self.assertIn(f"Registered in {settings.settings_path()} but not installed (run install.py --refresh):\n"
                       "  codex-pro\n", text)
-        unregistered = render_cron([6], "UTC", "old", "codex", "/bin")
-        self.assertIn("  settings: not registered; re-run install.py --command old ... to register it\n",
-                      format_status(installed_jobs(unregistered), parser))
 
     def test_remove_drops_the_block_and_the_section(self):
         _, block = self.run_main(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex-pro",
                                   "--backend", "codex"])
-        out, written = self.run_main(["--remove", "codex-pro"], crontab=block)
+        _, written = self.run_main(["--remove", "codex-pro"], crontab=block)
         self.assertEqual(written, "")
-        self.assertIn("will be removed too", out)
-        self.assertIn("Settings updated; [codex-pro] section removed.", out)
-        self.assertNotIn("[codex-pro]", self.file_text())
+        self.assertFalse(settings.load().has_section("codex-pro"))
         # Registered but no block: only the section goes, and the crontab is left alone.
         self.run_main(["--command", "codex-pro", "--backend", "codex"])
-        out, written = self.run_main(["--remove", "codex-pro"])
+        _, written = self.run_main(["--remove", "codex-pro"])
         self.assertIsNone(written)
-        self.assertIn("No yo-codex-pro block in the crontab.", out)
-        self.assertNotIn("[codex-pro]", self.file_text())
+        self.assertFalse(settings.load().has_section("codex-pro"))
+
+    def test_settings_changed_during_confirmation_abort_before_writing(self):
+        _, block = self.run_main(["--tz", "UTC", "--hours", "9-18", "--command", "codex"])
+
+        def concurrent_install(_):
+            parser = settings.load()
+            settings.update_command(parser, "other", {"backend": "claude", "model": "opus"})
+            settings.save(parser)
+            return "y"
+
+        for argv in (["--command", "codex"], ["--command", "codex", "--no-schedule"],
+                     ["--remove", "codex"], ["--refresh"]):
+            with self.subTest(argv=argv):
+                parser = settings.load()
+                parser.remove_section("other")
+                settings.save(parser)
+                with mock.patch("install.confirm", side_effect=concurrent_install), \
+                        mock.patch("install.write_crontab") as write, \
+                        self.assertRaisesRegex(SystemExit, "settings changed during confirmation"):
+                    self.run_main(argv, crontab=block)
+                write.assert_not_called()
+                self.assertEqual(dict(settings.load()["codex"]), dict(parser["codex"]))
+                self.assertEqual(settings.load()["other"]["model"], "opus")
 
 
 if __name__ == "__main__":

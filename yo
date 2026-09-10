@@ -33,7 +33,7 @@ def main(argv=None):
 
     config = settings.load()
     registered = config.has_section(args.command)
-    section = settings.command_settings(config, args.command) if registered else settings.defaults(config)
+    section = config[args.command] if registered else config[settings.DEFAULT_SECTION]
     if args.backend is None and registered:
         args.backend = section.get("backend")
     try:

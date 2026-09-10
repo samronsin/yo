@@ -42,8 +42,7 @@ or `./install.py --remove claude` to stop. See [Usage](#usage) for more.
   window across your day (see [Window model](#window-model)) and pipes the
   result into your crontab. The schedule is computed in your `--tz` and then
   **converted to the system time cron actually schedules against** (see
-  [Timezones](#timezones)). It records each command in `~/.yo/settings.ini`
-  (see [Settings](#settings)) so later runs, `yo` and `--refresh` need no flags.
+  [Timezones](#timezones)).
 - **`utils/codex_runner.py`** — the Codex backend called by `yo`: owns the
   Codex invocation and, with `--probe`, verifies and records the ping.
 - **`utils/claude_runner.py`** — the Claude backend: sends a plain ping and
@@ -153,11 +152,9 @@ One command per run — for several, run it once each:
 ./install.py --tz Europe/Paris --hours 9-18 --command claude
 ```
 
-Each command gets its own marked block in the crontab and its own section in
-`~/.yo/settings.ini`, so installing one leaves the others (and your own crontab
-lines) untouched. Re-running a command replaces only its block; flags you omit
-come from the file, so `./install.py --command codex --hours 8-17` changes one
-thing.
+Each command gets its own crontab block and [settings](#settings) section.
+Re-running replaces only that command's block and preserves omitted settings:
+`./install.py --command codex --hours 8-17` changes just its hours.
 
 To see what's installed, with each command's run times, whether its block
 matches the settings file, and its log location:
@@ -169,15 +166,15 @@ matches the settings file, and its log location:
 For what the account's quota looks like right now, see
 [Quota status](#quota-status) (`./yo <command> --status`).
 
-To regenerate every registered command's block from the file, after a clock
+To regenerate every scheduled command's block from the file, after a clock
 change or a hand edit of the settings:
 
 ```sh
 ./install.py --refresh
 ```
 
-To stop a command, remove its block and its settings section (review, confirm,
-gone). Only that command goes; other commands and your own crontab lines stay:
+To stop a command, remove its block and settings section, keeping other commands
+and your own crontab lines:
 
 ```sh
 ./install.py --remove codex
@@ -192,10 +189,9 @@ See `./install.py --help` for `--window-hours`, `--num-windows`, `--probe`/
 
 ### Settings
 
-`install.py` writes what it was asked to `~/.yo/settings.ini`, and `yo` reads
-it. Flags you give win and are written back; flags you omit fall back to the
-file, then to the built-in defaults. The first install seeds the host-wide
-`[DEFAULT]`; a command repeats a schedule value only where it differs:
+`install.py` persists flags in `~/.yo/settings.ini`; omitted flags fall back to
+the file, then built-in defaults. The first install seeds `[DEFAULT]`, and
+command sections store only overrides:
 
 ```ini
 [DEFAULT]
@@ -219,21 +215,19 @@ hours = 19-23
 - Host-wide, overridable per command: `tz`, `hours`, `window_hours`,
   `num_windows`.
 
-A registered command needs no `--backend` on `yo`, `--status` renders in its
-`tz`, and `--refresh` rebuilds its block. On a machine that must never get a
-crontab (a laptop), register the logins without one:
+`yo` reads these settings; its flags override them for one run. Registered
+commands need no `--backend`, and `--status` uses their `tz`. To register
+without scheduling:
 
 ```sh
 ./install.py --command claude-perso --backend claude --no-schedule
 ./yo claude-perso --status                # no --backend needed
 ```
 
-`--refresh` skips such a command, `install.py --status` lists it apart, and
-re-running the install with `--schedule` (and a `--tz`/`--hours`) schedules it. The file is plain INI: edit it by
-hand, then `--refresh`. Section names are command names (`DEFAULT` is
-reserved), values are strings, and comments are lost when `install.py` rewrites
-the file. Nothing about credentials or profiles goes here: the wrapper script
-owns that.
+`--refresh` skips unscheduled commands; `--schedule` enables them once `tz`
+and `hours` are set. You can edit the INI file and run `--refresh` to apply it.
+`DEFAULT` is reserved; rewrites discard comments. Credentials and profiles
+belong in the wrapper script, not this file.
 
 ### Custom commands
 
