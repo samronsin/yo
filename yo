@@ -1,30 +1,43 @@
 #!/usr/bin/env python3
-"""Send a ping through Codex or Claude, optionally probing Codex's quota window."""
+"""Send a ping through Codex or Claude, optionally probing Codex's quota window.
+
+With --status, report the account's quota windows and the last run instead.
+"""
 import argparse
 import subprocess
 import sys
 
 from install import BACKENDS, command_name, resolve_backend
-from utils import claude_runner, codex_runner
+from utils import claude_runner, codex_runner, status
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", type=command_name)
     parser.add_argument("--backend", choices=BACKENDS)
     for name in ("model", "effort", "thread-source"):
         parser.add_argument(f"--{name}", default="")
     parser.add_argument("--probe", action="store_true")
+    parser.add_argument("--status", action="store_true",
+                        help="report the account's quota windows and the last run instead of pinging")
     args = parser.parse_args(argv)
     try:
         args.backend = resolve_backend(args.command, args.backend)
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
+    if args.status:
+        # A status read sends nothing, so the ping's knobs have no meaning with it.
+        given = [flag for flag, value in (("--probe", args.probe), ("--model", args.model),
+                                          ("--effort", args.effort), ("--thread-source", args.thread_source))
+                 if value]
+        if given:
+            parser.error(f"--status cannot be combined with {', '.join(given)}")
     if args.probe and args.backend != "codex":
-        parser.error("--probe is only supported with the codex backend (Claude exposes no quota window to verify against)")
+        parser.error("--probe is only supported with the codex backend (Claude's /usage read is minute-precise, too coarse to verify anchoring; see --status)")
     runner = codex_runner if args.backend == "codex" else claude_runner
     try:
-        return runner.run(args)
+        return status.main(args) if args.status else runner.run(args)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
         print(f"{args.command}: {exc}", file=sys.stderr)
         return 2

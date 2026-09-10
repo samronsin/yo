@@ -20,9 +20,9 @@ import subprocess
 import sys
 
 if __package__:
-    from .codex_anchor_probe import ROOT_DIR, probe
+    from .codex_anchor_probe import ROOT_DIR, WINDOW_SECS, five_hour_read, probe, read_limits_payload, window_reads
 else:
-    from codex_anchor_probe import ROOT_DIR, probe
+    from codex_anchor_probe import ROOT_DIR, WINDOW_SECS, five_hour_read, probe, read_limits_payload, window_reads
 
 SCHEMA = 1
 BACKEND = "codex"  # the only backend with a quota observer
@@ -148,6 +148,37 @@ def cli_version(command):
         return None
     found = re.search(r"\d+\.\d+\.\d+\S*", text)
     return found.group(0) if found else (text or None)
+
+
+def quota(command):
+    """The account's quota windows via `<command> app-server`, for `yo --status`.
+
+    One read settles every window but the 5h one, which may need a second read
+    PRE_WAIT_SECS later to tell a fresh window from the drifting hypothetical
+    reset an idle account reports (codex_anchor_probe.window_reads). Returns
+    {"five_hour": {"state", "used_percent", "resets_at", "anchored_at", "reads"}
+    or None when the account reports no 5h window, "weekly": [{"window_minutes",
+    "used_percent", "resets_at"}...] for the other windows it does report}.
+    """
+    payload = read_limits_payload(command=command)
+    out = {"five_hour": None, "weekly": []}
+    try:
+        reads = [five_hour_read(payload)]
+    except RuntimeError:  # no 5h window in the payload (seen 2026-08-08 to 08-24)
+        reads = []
+    if reads:
+        state = window_reads(command, reads)
+        last = reads[-1]
+        out["five_hour"] = {"state": state, "used_percent": last["used_percent"],
+                            "resets_at": last["resets_at"], "reads": reads,
+                            "anchored_at": last["resets_at"] - WINDOW_SECS if state == "active" else None}
+    for slot in ("primary", "secondary"):
+        limit = payload.get(slot)
+        if isinstance(limit, dict) and limit.get("windowDurationMins") != WINDOW_SECS // 60:
+            out["weekly"].append({"window_minutes": limit.get("windowDurationMins"),
+                                  "used_percent": limit.get("usedPercent"),
+                                  "resets_at": limit.get("resetsAt")})
+    return out
 
 
 def run_logs(command, log_dir=None):

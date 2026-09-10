@@ -41,14 +41,14 @@ class DispatchTests(ScratchCase):
                 self.assertEqual(yo.main([backend]), 7)
                 self.assertEqual(vars(run.call_args.args[0]), {
                     "command": backend, "backend": backend, "model": "", "effort": "",
-                    "thread_source": "", "probe": False,
+                    "thread_source": "", "probe": False, "status": False,
                 })
         with mock.patch.object(codex_runner, "run", return_value=0) as run:
             self.assertEqual(yo.main(["wrapper", "--backend", "codex", "--probe", "--model", "m",
                                       "--effort", "high", "--thread-source", "scheduled"]), 0)
             self.assertEqual(vars(run.call_args.args[0]), {
                 "command": "wrapper", "backend": "codex", "model": "m", "effort": "high",
-                "thread_source": "scheduled", "probe": True,
+                "thread_source": "scheduled", "probe": True, "status": False,
             })
 
     def test_invalid_arguments_fail_before_running(self):

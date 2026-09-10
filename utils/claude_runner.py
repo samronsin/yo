@@ -1,4 +1,6 @@
-"""yo's Claude backend: send a plain ping, keeping its output and status in the run log."""
+"""yo's Claude backend: send a plain ping (run) or read the account's quota windows (quota)."""
+import json
+import re
 import subprocess
 
 if __package__:
@@ -33,3 +35,58 @@ def run(args):
                 rc = 127 if isinstance(exc, FileNotFoundError) else 126
         log.write(f"[{shared.stamp()}] yo end rc={rc}\n")
     return rc
+
+
+# Headless `/usage`: Claude Code answers the slash command in print mode
+# without a model turn (the JSON envelope reports num_turns 0 and zero tokens,
+# verified on 2.1.265), so this read cannot anchor a window. The CLI resolves
+# and refreshes its own credentials, which is why yo goes through it rather
+# than the claude.ai usage endpoint (that would need per-profile keychain
+# access and a token yo must never refresh).
+USAGE_ARGS = ["--print", "--output-format", "json", "/usage"]
+USAGE_TIMEOUT_SECS = 60
+# The result is prose; these are the limit lines as of 2.1.265, e.g.
+#   Current session: 18% used · resets Sep 10 at 4:30pm (Europe/Paris)
+#   Current week (all models): 26% used · resets Sep 14 at 5am (Europe/Paris)
+#   Current week (Fable): 49% used · resets Sep 14 at 5am (Europe/Paris)
+# Reset times come at minute precision in the machine's timezone; keep them as text.
+SESSION_RE = re.compile(r"^Current session: ([\d.]+)% used\W+resets (.+?)\s*$", re.MULTILINE)
+WEEK_RE = re.compile(r"^Current week \((.+?)\): ([\d.]+)% used\W+resets (.+?)\s*$", re.MULTILINE)
+
+
+def _number(text):
+    value = float(text)
+    return int(value) if value.is_integer() else value
+
+
+def quota(command):
+    """The account's quota windows from `<command> --print /usage`, for `yo --status`.
+
+    Returns {"five_hour": {"used_percent", "resets"} or None, "weekly": [{"scope",
+    "used_percent", "resets"}...], "spent_turns", "cost_usd"}. Raises RuntimeError
+    when the CLI fails or its output is not the /usage view.
+    """
+    proc = subprocess.run([command, *USAGE_ARGS], stdin=subprocess.DEVNULL, capture_output=True,
+                          text=True, timeout=USAGE_TIMEOUT_SECS, cwd=shared.ROOT_DIR)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        raise RuntimeError(f"{command} /usage exited {proc.returncode}: {detail[-1][:200] if detail else 'no output'}")
+    try:
+        envelope = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"unexpected /usage output: {proc.stdout.strip()[:120]!r}") from None
+    text = envelope.get("result") if isinstance(envelope, dict) else None
+    if not isinstance(envelope, dict) or envelope.get("is_error") or not isinstance(text, str):
+        raise RuntimeError(f"unexpected /usage result: {proc.stdout.strip()[:200]!r}")
+    session = SESSION_RE.search(text)
+    weeks = WEEK_RE.findall(text)
+    if not session and not weeks:
+        first = text.strip().splitlines()[0] if text.strip() else ""
+        raise RuntimeError(f"unrecognized /usage output: {first[:120]!r}")
+    return {
+        "five_hour": {"used_percent": _number(session[1]), "resets": session[2]} if session else None,
+        "weekly": [{"scope": scope, "used_percent": _number(used), "resets": resets}
+                   for scope, used, resets in weeks],
+        "spent_turns": envelope.get("num_turns", 0),
+        "cost_usd": envelope.get("total_cost_usd"),
+    }
