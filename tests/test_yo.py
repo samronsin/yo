@@ -25,7 +25,6 @@ class DispatchTests(ScratchCase):
         super().setUp()
         self.install_fake_cli()
         self.patch(codex_runner, "ROOT_DIR", self.root)  # claude_runner logs through codex_runner's helpers
-        self.log_dir = self.root / "logs"
 
     def invoke(self, *args, backend="codex", env=None):
         stdout, stderr = io.StringIO(), io.StringIO()
@@ -88,7 +87,7 @@ class DispatchTests(ScratchCase):
 
     def test_claude_run_log_is_terminated_even_when_the_last_message_file_fails(self):
         last = self.log_dir / "yo-wrapper.last.txt"
-        self.log_dir.mkdir()
+        self.log_dir.mkdir(parents=True)
         last.write_text("stale")
         last.chmod(0o444)
         self.addCleanup(last.chmod, 0o644)
@@ -163,9 +162,9 @@ class DispatchTests(ScratchCase):
             shutil.copy(REPO_ROOT / name, repo / name)
         shutil.copytree(REPO_ROOT / "utils", repo / "utils", ignore=shutil.ignore_patterns("__pycache__"))
         (self.root / "yo").symlink_to(repo / "yo")
-        # HOME is the scratch root, so the subprocess's ~/.yo/ is root/.yo (never the real one).
+        # self.env carries the scratch HOME, so the subprocess's ~/.yo/ is root/.yo (never the real one).
         result = subprocess.run(["yo", "wrapper", "--backend", "codex"], cwd=self.root,
-                                env=self.env | {"HOME": str(self.root)}, capture_output=True, text=True, timeout=30)
+                                env=self.env, capture_output=True, text=True, timeout=30)
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
         self.assertEqual(self.sent_argv()[-1], "yo")
         (log,) = (self.root / ".yo" / "logs").glob("*.log")

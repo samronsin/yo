@@ -20,8 +20,12 @@ class ScratchCase(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
-        # ~/.yo/ (settings and logs) is the scratch root itself, so logs land in root/logs.
-        self.patch(settings, "HOME_DIR", self.root)
+        # HOME is the scratch root, so ~/.yo/ (settings, logs, locks) and the ~/.codex* globs
+        # resolve under it, in this process and in the CLIs and yo it spawns.
+        env = mock.patch.dict(os.environ, {"HOME": str(self.root)})
+        self.addCleanup(env.stop)
+        env.start()
+        self.log_dir = settings.log_dir()
 
     def patch(self, target, attribute, *args, **kwargs):
         patcher = mock.patch.object(target, attribute, *args, **kwargs)

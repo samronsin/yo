@@ -142,7 +142,6 @@ class InvocationTests(ScratchCase):
 class RunTests(ScratchCase):
     def setUp(self):
         super().setUp()
-        self.log_dir = self.root / "logs"
         self.patch(runner, "ROOT_DIR", self.root)
         self.patch(runner, "cli_version", return_value="0.153.4")
         self.patch(runner.shutil, "which", return_value="/opt/bin/wrapper")

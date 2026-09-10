@@ -24,7 +24,6 @@ strings; callers convert. Comments are lost when install.py rewrites the file.
 import configparser
 from pathlib import Path
 
-HOME_DIR = Path.home() / ".yo"  # tests patch this
 SETTINGS_NAME = "settings.ini"
 DEFAULT_SECTION = configparser.DEFAULTSECT  # "DEFAULT": reserved, never a command name
 
@@ -34,12 +33,17 @@ COMMAND_KEYS = ("backend", "schedule", "probe", "model", "effort", "thread_sourc
 # (a laptop that must never get a crontab); --refresh skips it.
 
 
+def home_dir():
+    """~/.yo, resolved from HOME at call time (tests point HOME at a scratch directory)."""
+    return Path.home() / ".yo"
+
+
 def log_dir():
-    return HOME_DIR / "logs"
+    return home_dir() / "logs"
 
 
 def settings_path():
-    return HOME_DIR / SETTINGS_NAME
+    return home_dir() / SETTINGS_NAME
 
 
 def load():
@@ -51,8 +55,8 @@ def load():
 
 def save(parser):
     """Write the file atomically, creating ~/.yo/ if needed."""
-    HOME_DIR.mkdir(parents=True, exist_ok=True)
     path = settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     with tmp.open("w") as handle:
         parser.write(handle)

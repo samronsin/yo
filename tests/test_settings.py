@@ -49,13 +49,13 @@ class SettingsFileTests(ScratchCase):
         self.assertEqual((settings.format_value(True), settings.format_value(False), settings.format_value(5)),
                          ("true", "false", "5"))
 
-    def test_save_creates_the_directory(self):
-        nested = self.root / "nested" / ".yo"
-        self.patch(settings, "HOME_DIR", nested)
-        self.assertEqual(settings.log_dir(), nested / "logs")
+    def test_paths_follow_home_and_save_creates_the_directory(self):
+        self.assertEqual(settings.home_dir(), self.root / ".yo")
+        self.assertEqual(settings.log_dir(), self.root / ".yo" / "logs")
+        self.assertFalse(settings.home_dir().exists())
         settings.save(settings.load())
         self.assertEqual(settings.settings_path().read_text(), "")
-        self.assertFalse(list(nested.glob("*.tmp")))
+        self.assertFalse(list(settings.home_dir().glob("*.tmp")))
 
 
 if __name__ == "__main__":

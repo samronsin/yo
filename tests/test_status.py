@@ -30,7 +30,6 @@ class FakeCliCase(ScratchCase):
         super().setUp()
         self.install_fake_cli()
         self.patch(codex_runner, "ROOT_DIR", self.root)
-        self.log_dir = self.root / "logs"
         self.sleep = self.patch(anchor.time, "sleep")
 
     def with_env(self, **extra):

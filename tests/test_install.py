@@ -294,14 +294,19 @@ class ManagedBlocksTest(unittest.TestCase):
             self.assertIsNone(parse_cron_entry(other), other)
 
 
-class StatusTest(unittest.TestCase):
+class ScratchHome(unittest.TestCase):
+    """HOME under a scratch directory, so ~/.yo is private to the test."""
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.home = Path(temp.name) / ".yo"  # a private ~/.yo, so installs never touch the real one
-        patcher = mock.patch.object(settings, "HOME_DIR", self.home)
-        self.addCleanup(patcher.stop)
-        patcher.start()
+        env = mock.patch.dict(os.environ, {"HOME": temp.name})
+        self.addCleanup(env.stop)
+        env.start()
+        self.home = settings.home_dir()
+
+
+class StatusTest(ScratchHome):
 
     def test_format_status(self):
         # Logs live under ~/.yo/logs whichever checkout installed the block; an
@@ -487,15 +492,8 @@ class ToSystemTimesTest(unittest.TestCase):
             self.assertEqual(hour_minute(to_system_times([-1], "Etc/GMT-5")[0]), (18, 0))
 
 
-class SettingsFlowTest(unittest.TestCase):
+class SettingsFlowTest(ScratchHome):
     """Install, refresh, status and remove against a private ~/.yo and a mocked crontab."""
-
-    def setUp(self):
-        temp = tempfile.TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        patcher = mock.patch.object(settings, "HOME_DIR", Path(temp.name) / ".yo")
-        self.addCleanup(patcher.stop)
-        patcher.start()
 
     def run_main(self, argv, crontab="", reply="y"):
         """install.main over `argv`; returns (stdout, crontab text written or None)."""
