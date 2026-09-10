@@ -2,7 +2,7 @@
 
 `yo <codex command>` calls this runner. The production invocation lives in
 codex_command(). A plain run sends it and writes the run log
-(logs/yo-<command>-<timestamp>.log). With --probe the ping is bracketed by
+(~/.yo/logs/yo-<command>-<timestamp>.log). With --probe the ping is bracketed by
 utils/codex_anchor_probe.py's token-free quota reads and the run log ends
 with a verdict line and one `record: {...}` JSON line: what ran (model,
 effort, thread source, prompt, CLI version, executable), the quota reads,
@@ -21,8 +21,10 @@ import sys
 
 if __package__:
     from .codex_anchor_probe import ROOT_DIR, WINDOW_SECS, five_hour_read, probe, read_limits_payload, window_reads
+    from . import settings
 else:
     from codex_anchor_probe import ROOT_DIR, WINDOW_SECS, five_hour_read, probe, read_limits_payload, window_reads
+    import settings
 
 SCHEMA = 1
 BACKEND = "codex"  # the only backend with a quota observer
@@ -176,7 +178,7 @@ def quota(command):
 def run_logs(command, log_dir=None):
     """Exact command's timestamped run logs, oldest first; exclude wrappers sharing its prefix."""
     name = re.compile(rf"yo-{re.escape(command)}-\d{{8}}T\d{{6}}Z\.log")
-    return sorted(path for path in (log_dir or ROOT_DIR / "logs").glob(f"yo-{command}-*.log")
+    return sorted(path for path in (log_dir or settings.log_dir()).glob(f"yo-{command}-*.log")
                   if name.fullmatch(path.name))
 
 
@@ -203,9 +205,9 @@ def open_run_log(command):
 
     Both backends log here so the names stay the ones run_logs() globs and
     install.py's status points at: yo-<command>-<UTC stamp>.log and
-    yo-<command>.last.txt under logs/.
+    yo-<command>.last.txt under ~/.yo/logs/ (settings.log_dir).
     """
-    log_dir = ROOT_DIR / "logs"
+    log_dir = settings.log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
     utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log_file = log_dir / f"yo-{command}-{utc}.log"
@@ -229,9 +231,10 @@ def run(args):
             print(f"{args.command}: another ping is still being verified; skipped", file=sys.stderr)
             return 0
         record = probe(lambda: send_ping(args.command, config, log_file, last_message_file), args.command)
+        # source: "default" (yo's own), "manual" (flags), or "settings" (~/.yo/settings.ini, see yo)
+        source = getattr(args, "override_source", None) or ("manual" if any(overrides.values()) else "default")
         record.update(schema=SCHEMA, command=args.command, executable=shutil.which(args.command),
-                      source="manual" if any(overrides.values()) else "default",
-                      effective={**config, "prompt": PROMPT})
+                      source=source, effective={**config, "prompt": PROMPT})
         record.setdefault("cli_version", cli_version(args.command))
         if record["outcome"] == "window_open":
             append(log_file, f"[{stamp()}] yo end rc=0 (window already open, nothing sent)")

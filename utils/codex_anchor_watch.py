@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 
 from codex_anchor_probe import DRIFT_TOLERANCE_SECS, WINDOW_SECS, read_rate_limits, utc
+from settings import log_dir
 
 ROOT_DIR = Path(__file__).resolve().parent.parent  # repo root
 ATTRIBUTION_TOLERANCE_SECS = 120  # cron starts at :30:01; request lands seconds later
@@ -67,7 +68,7 @@ def crontab_firing_times() -> list[tuple[int, int]]:
 def cron_log_status(cron_dt: datetime.datetime) -> str:
     """Summarize the cron's own log to catch pings that died client-side."""
     cron_dt = cron_dt.astimezone(datetime.timezone.utc)  # yo names logs in UTC
-    pattern = str(ROOT_DIR / "logs" / f"yo-codex-{cron_dt:%Y%m%d}T{cron_dt:%H%M}*.log")
+    pattern = str(log_dir() / f"yo-codex-{cron_dt:%Y%m%d}T{cron_dt:%H%M}*.log")
     logs = sorted(glob.glob(pattern))
     if not logs:
         return f"WARNING: no cron log matching {Path(pattern).name} — did cron run?"

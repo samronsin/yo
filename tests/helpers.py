@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from utils import settings
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FAKE_CODEX = Path(__file__).resolve().parent / "fixtures" / "fake_codex.py"
 
@@ -18,6 +20,8 @@ class ScratchCase(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
+        # ~/.yo/ (settings and logs) is the scratch root itself, so logs land in root/logs.
+        self.patch(settings, "HOME_DIR", self.root)
 
     def patch(self, target, attribute, *args, **kwargs):
         patcher = mock.patch.object(target, attribute, *args, **kwargs)

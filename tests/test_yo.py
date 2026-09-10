@@ -13,7 +13,7 @@ import unittest
 from unittest import mock
 
 from tests.helpers import REPO_ROOT, ScratchCase
-from utils import claude_runner, codex_anchor_probe as anchor, codex_runner
+from utils import claude_runner, codex_anchor_probe as anchor, codex_runner, settings
 
 SPEC = spec_from_loader("yo_cli", SourceFileLoader("yo_cli", str(REPO_ROOT / "yo")))
 yo = module_from_spec(SPEC)
@@ -42,6 +42,7 @@ class DispatchTests(ScratchCase):
                 self.assertEqual(vars(run.call_args.args[0]), {
                     "command": backend, "backend": backend, "model": "", "effort": "",
                     "thread_source": "", "probe": False, "status": False,
+                    "override_source": None, "tz": None,
                 })
         with mock.patch.object(codex_runner, "run", return_value=0) as run:
             self.assertEqual(yo.main(["wrapper", "--backend", "codex", "--probe", "--model", "m",
@@ -49,6 +50,7 @@ class DispatchTests(ScratchCase):
             self.assertEqual(vars(run.call_args.args[0]), {
                 "command": "wrapper", "backend": "codex", "model": "m", "effort": "high",
                 "thread_source": "scheduled", "probe": True, "status": False,
+                "override_source": "manual", "tz": None,
             })
 
     def test_invalid_arguments_fail_before_running(self):
@@ -116,6 +118,31 @@ class DispatchTests(ScratchCase):
         self.assertFalse(self.argv.exists())
         self.assertEqual(codex_runner.load_records("wrapper", self.log_dir)[-1]["outcome"], "window_open")
 
+    def test_registered_command_takes_backend_and_overrides_from_settings(self):
+        parser = settings.load()
+        settings.update_command(parser, "wrapper", {"backend": "codex", "model": "gpt-5.6-luna", "tz": "Asia/Tokyo"})
+        settings.save(parser)
+        with mock.patch.object(codex_runner, "run", return_value=0) as codex, \
+                mock.patch.object(claude_runner, "run", return_value=0) as claude:
+            self.assertEqual(yo.main(["wrapper"]), 0)
+            args = codex.call_args.args[0]
+            self.assertEqual((args.backend, args.model, args.effort, args.override_source, args.tz),
+                             ("codex", "gpt-5.6-luna", "", "settings", "Asia/Tokyo"))
+            yo.main(["wrapper", "--model", "m"])  # a flag wins for this run
+            args = codex.call_args.args[0]
+            self.assertEqual((args.model, args.override_source), ("m", "manual"))
+            yo.main(["wrapper", "--backend", "claude"])  # so does an explicit backend
+            self.assertEqual(claude.call_args.args[0].backend, "claude")
+            # An unregistered command still needs --backend, and the error says how to register it.
+            with redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
+                yo.main(["other"])
+            self.assertIn("install.py --command other --backend", err.getvalue())
+            # [DEFAULT] tz applies to unregistered commands too.
+            parser[settings.DEFAULT_SECTION]["tz"] = "UTC"
+            settings.save(parser)
+            yo.main(["codex"])
+            self.assertEqual(codex.call_args.args[0].tz, "UTC")
+
     def test_executable_on_path_works_outside_the_repo(self):
         repo = self.root / "repo"
         repo.mkdir()
@@ -123,12 +150,14 @@ class DispatchTests(ScratchCase):
             shutil.copy(REPO_ROOT / name, repo / name)
         shutil.copytree(REPO_ROOT / "utils", repo / "utils", ignore=shutil.ignore_patterns("__pycache__"))
         (self.root / "yo").symlink_to(repo / "yo")
+        # HOME is the scratch root, so the subprocess's ~/.yo/ is root/.yo (never the real one).
         result = subprocess.run(["yo", "wrapper", "--backend", "codex"], cwd=self.root,
-                                env=self.env, capture_output=True, text=True, timeout=30)
+                                env=self.env | {"HOME": str(self.root)}, capture_output=True, text=True, timeout=30)
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
         self.assertEqual(self.sent_argv()[-1], "yo")
-        (log,) = (repo / "logs").glob("*.log")
+        (log,) = (self.root / ".yo" / "logs").glob("*.log")
         self.assertIn(f"root={repo.resolve()}", log.read_text())
+        self.assertFalse((repo / "logs").exists())
 
 
 if __name__ == "__main__":

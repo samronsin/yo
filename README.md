@@ -15,15 +15,16 @@ agent CLI you want already on `PATH`:
 git clone https://github.com/samronsin/yo.git
 cd yo
 
-./yo claude                 # smoke-test: one ping now, reply in logs/
+./yo claude                 # smoke-test: one ping now, reply in ~/.yo/logs/
 
 # install a daily schedule anchored to your working hours
 ./install.py --tz Europe/Paris --hours 9-18 --command claude
 ```
 
-That's it — `cron` now pings on schedule. Re-run `install.py` any time to change
-the hours or commands, or `./install.py --remove claude` to stop. See
-[Usage](#usage) for more.
+That's it — `cron` now pings on schedule, and what you asked for is kept in
+`~/.yo/settings.ini` (see [Settings](#settings)). Re-run `install.py` any time
+to change the hours or commands, `./install.py --refresh` after a clock change,
+or `./install.py --remove claude` to stop. See [Usage](#usage) for more.
 
 ## Components
 
@@ -41,7 +42,8 @@ the hours or commands, or `./install.py --remove claude` to stop. See
   window across your day (see [Window model](#window-model)) and pipes the
   result into your crontab. The schedule is computed in your `--tz` and then
   **converted to the system time cron actually schedules against** (see
-  [Timezones](#timezones)).
+  [Timezones](#timezones)). It records each command in `~/.yo/settings.ini`
+  (see [Settings](#settings)) so later runs, `yo` and `--refresh` need no flags.
 - **`utils/codex_runner.py`** — the Codex backend called by `yo`: owns the
   Codex invocation and, with `--probe`, verifies and records the ping.
 - **`utils/claude_runner.py`** — the Claude backend: sends a plain ping and
@@ -49,6 +51,8 @@ the hours or commands, or `./install.py --remove claude` to stop. See
 - **`utils/status.py`** — `yo <command> --status`: the account's quota
   windows and the last run, read token-free through each CLI (see
   [Quota status](#quota-status)).
+- **`utils/settings.py`** — `~/.yo/`: the settings file and the logs directory
+  (see [Settings](#settings)).
 - **`tests/`** — the test suite (`python3 -m unittest` from the repo root).
 
 ## Usage
@@ -59,23 +63,27 @@ Run once, ad hoc:
 ./yo codex                    # Codex, default model (GPT-5.6-terra)
 ./yo claude                   # Claude, default model (Haiku)
 ./yo claude --model opus      # Claude with an explicit model
+./yo codex-pro                # a registered custom command: backend from settings
 ```
 
 ### Quota status
 
 `--status` reads quota windows through the CLI and shows the last run.
-It accepts the same command and `--backend` as a ping, but no ping flags:
+It accepts the same command (and `--backend`, unless the command is registered
+in [settings](#settings)) as a ping, but no ping flags. Times are shown in the
+command's `tz` from settings, else the machine's:
 
 ```sh
-./yo codex --status                       # Codex login, via `codex app-server`
-./yo claude-pro --backend claude --status # Claude wrapper, via headless `/usage`
+./yo codex --status                         # Codex login, via `codex app-server`
+./yo claude-pro --status                    # a registered Claude wrapper, via headless `/usage`
+./yo claude-perso --backend claude --status # an unregistered one needs --backend
 ```
 
 ```
 codex (codex), read 2026-09-10 13:44 CEST
   5h window   open, 12% used, anchored 11:30, resets 2026-09-10 16:30 CEST (2h46m left)
   weekly      31% used, resets 2026-09-14 09:00 CEST
-  last run    2026-09-10 06:00 CEST, anchored (default), rc=0, /srv/yo/logs/yo-codex-20260910T040004Z.log
+  last run    2026-09-10 06:00 CEST, anchored (default), rc=0, /home/me/.yo/logs/yo-codex-20260910T040004Z.log
 ```
 
 - **Codex** uses the probe's token-free quota read. An ambiguous 5h window
@@ -128,7 +136,7 @@ verified.
 ```sh
 ./yo codex                               # plain ping, about five seconds
 ./yo codex --probe                       # the same ping, verified and recorded
-grep -h '^record: ' logs/yo-codex-*.log | sed 's/^record: //' | python3 -m json.tool
+grep -h '^record: ' ~/.yo/logs/yo-codex-*.log | sed 's/^record: //' | python3 -m json.tool
 ```
 
 `install.py` emits `--probe` on Codex lines by default, so the block you
@@ -145,11 +153,14 @@ One command per run — for several, run it once each:
 ./install.py --tz Europe/Paris --hours 9-18 --command claude
 ```
 
-Each command gets its own marked block in the crontab, so installing one leaves
-the others (and your own crontab lines) untouched. Re-running a command replaces
-only its block.
+Each command gets its own marked block in the crontab and its own section in
+`~/.yo/settings.ini`, so installing one leaves the others (and your own crontab
+lines) untouched. Re-running a command replaces only its block; flags you omit
+come from the file, so `./install.py --command codex --hours 8-17` changes one
+thing.
 
-To see what's installed, with each command's run times and log location:
+To see what's installed, with each command's run times, whether its block
+matches the settings file, and its log location:
 
 ```sh
 ./install.py --status
@@ -158,8 +169,15 @@ To see what's installed, with each command's run times and log location:
 For what the account's quota looks like right now, see
 [Quota status](#quota-status) (`./yo <command> --status`).
 
-To stop a command, remove its block (review it, confirm, and it's gone). Only
-that block goes; other commands' blocks and your own crontab lines stay:
+To regenerate every registered command's block from the file, after a clock
+change or a hand edit of the settings:
+
+```sh
+./install.py --refresh
+```
+
+To stop a command, remove its block and its settings section (review, confirm,
+gone). Only that command goes; other commands and your own crontab lines stay:
 
 ```sh
 ./install.py --remove codex
@@ -168,7 +186,44 @@ that block goes; other commands' blocks and your own crontab lines stay:
 A block installed under a name you've since renamed keeps firing until it's
 removed; `--status` lists it, so `--remove` it by its old name.
 
-See `./install.py --help` for `--window-hours`, `--num-windows`, and `--yes`.
+See `./install.py --help` for `--window-hours`, `--num-windows`, `--probe`/
+`--no-probe`, the persisted `--model`/`--effort`/`--thread-source` overrides,
+and `--yes`.
+
+### Settings
+
+`install.py` writes what it was asked to `~/.yo/settings.ini`, and `yo` reads
+it. Flags you give win and are written back; flags you omit fall back to the
+file, then to the built-in defaults. The first install seeds the host-wide
+`[DEFAULT]`; a command repeats a schedule value only where it differs:
+
+```ini
+[DEFAULT]
+tz = Europe/Paris
+hours = 9-18
+window_hours = 5
+num_windows = 3
+
+[codex-pro]
+backend = codex
+
+[claude-perso]
+backend = claude
+hours = 19-23
+```
+
+- Per command: `backend`; `probe` (`--probe`/`--no-probe`; the codex default
+  is on); optional `model`, `effort`, `thread_source` overrides, which `yo`
+  applies to that command's pings (a record then says `source: settings`).
+- Host-wide, overridable per command: `tz`, `hours`, `window_hours`,
+  `num_windows`.
+
+A registered command needs no `--backend` on `yo`, `--status` renders in its
+`tz`, and `--refresh` rebuilds its block. The file is plain INI: edit it by
+hand, then `--refresh`. Section names are command names (`DEFAULT` is
+reserved), values are strings, and comments are lost when `install.py` rewrites
+the file. Nothing about credentials or profiles goes here: the wrapper script
+owns that.
 
 ### Custom commands
 
@@ -200,11 +255,13 @@ still infer themselves:
 ./install.py ... --command claude-perso  --backend claude
 ```
 
-A custom name with no `--backend` is rejected, since the runner is unknown.
+A custom name with no `--backend` is rejected unless `install.py` has
+registered it (see [Settings](#settings)), since the runner is unknown.
 
-`install.py` keys the log and crontab marker on the command name
-(`yo-codex-pro`), and bakes the resolved `--backend` into the generated cron
-line. Every command must resolve on `PATH` — `install.py` prepends the directory
+`install.py` keys the log, the crontab marker and the settings section on the
+command name (`yo-codex-pro`), and bakes the resolved `--backend` into the
+generated cron line as well, so scheduled pings keep running even if the
+settings file is lost. Every command must resolve on `PATH` — `install.py` prepends the directory
 it's found in to the block's cron `PATH`, same as for a backend name.
 
 ## Window model
@@ -263,12 +320,14 @@ Scheduled pings (claude): 06:00, 11:02, 16:04 Europe/Paris -> 04:00, 09:02, 14:0
 
 Because a static crontab can't follow daylight-saving transitions, the offset is
 fixed at install time. After the clocks change (or if you move the box to
-another timezone), **re-run `install.py`** to re-anchor the schedule.
+another timezone), run **`./install.py --refresh`** to re-anchor every
+schedule from the settings file; `--status` shows which blocks have drifted.
 
 ## Logs
 
-Written under `logs/` as `yo-<command>-<timestamp>.log`, with the final message
-in `yo-<command>.last.txt`. Probed Codex runs end with a `record:` line holding
+Written under `~/.yo/logs/` as `yo-<command>-<timestamp>.log`, with the final
+message in `yo-<command>.last.txt`. Logs from before this layout stay where they
+were, under the checkout's `logs/`. Probed Codex runs end with a `record:` line holding
 the ping's verified outcome (see [Recorded Codex pings](#recorded-codex-pings)).
 
 ## Anchor test utilities
@@ -283,7 +342,7 @@ one-off work:
   [--thread-source S] [--wait SECS] [--force]` — the observer
   the runner uses, run as a one-shot outside the recorded history: one ping
   through the same invocation, then two rate-limit reads `--wait` seconds apart
-  (60s default). Its verdict and evidence go to `logs/gap-anchor-test-*`.
+  (60s default). Its verdict and evidence go to `~/.yo/logs/gap-anchor-test-*`.
   Change one variable per run; an ANCHORED verdict closes the gap for ~5h.
   Skips the ping while a window is open unless `--force`.
 - `utils/codex_anchor_watch.py [--cron-time HH:MM] [--now]` — verifies a cron ping

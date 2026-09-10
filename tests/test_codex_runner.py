@@ -188,6 +188,12 @@ class RunTests(ScratchCase):
             self.assertEqual(self.records()[-1]["effective"]["model"], "gpt-5.6-luna")
         self.assertEqual(len(self.records()), 6)
 
+    def test_record_source_names_a_settings_override(self):
+        with self.probe_returning("anchored"):
+            runner.run(args_for(model="gpt-5.6-luna", override_source="settings"))
+        self.assertEqual((self.records()[-1]["source"], self.records()[-1]["effective"]["model"]),
+                         ("settings", "gpt-5.6-luna"))
+
     def test_concurrent_run_is_skipped(self):
         self.log_dir.mkdir(parents=True)
         with (self.log_dir / "yo-wrapper.lock").open("a") as held:
