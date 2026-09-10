@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest import mock
 
-from tests.fixtures.scratch import ScratchCase
+from tests.helpers import ScratchCase
 from utils import codex_anchor_probe as anchor
 from utils import codex_runner as runner
 
