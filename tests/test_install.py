@@ -213,11 +213,6 @@ class ParseArgsTest(unittest.TestCase):
         args = self._parse("--command", "codex")
         self.assertEqual((args.tz, args.hours, args.window_hours, args.num_windows), (None, None, None, None))
 
-    def test_refresh_is_a_mode(self):
-        self.assertTrue(self._parse("--refresh").refresh)
-        self.assertIn("not allowed with", self._usage_error("--refresh", "--status"))
-        self.assertIn("--refresh cannot be combined with --tz", self._usage_error("--refresh", "--tz", "UTC"))
-
     def test_remove_name_validated_like_command(self):
         # The name is matched against the crontab markers, so it's held to the
         # same charset as --command (a stray shell-ish name can't match anyway).
@@ -481,7 +476,7 @@ class ToSystemTimesTest(unittest.TestCase):
 
 
 class SettingsFlowTest(ScratchCase):
-    """Install, refresh, status and remove against a private ~/.yo and a mocked crontab."""
+    """Install, status and remove against a private ~/.yo and a mocked crontab."""
 
     def run_main(self, argv, crontab="", reply="y"):
         """install.main over `argv`; returns (stdout, crontab text written or None)."""
@@ -535,61 +530,16 @@ class SettingsFlowTest(ScratchCase):
             self.run_main(["--command", "codex"])
         self.assertIn("num_windows = 'many'", cm.exception.code)
 
-    def test_misspelt_backend_in_the_file_stops_install_refresh_and_marks_status(self):
+    def test_misspelt_backend_in_the_file_stops_install_and_marks_status(self):
         parser = settings.load()
         settings.seed_defaults(parser, {"tz": "UTC", "hours": "9-18"})
         settings.update_command(parser, "work-ai", {"backend": "cdoex"})
         settings.save(parser)
-        for argv in (["--command", "work-ai"], ["--refresh"]):
-            with self.subTest(argv=argv), self.assertRaises(SystemExit) as cm:
-                self.run_main(argv)
-            self.assertEqual(cm.exception.code, "error: backend 'cdoex' for command 'work-ai' is not one of codex, claude")
+        with self.assertRaises(SystemExit) as cm:
+            self.run_main(["--command", "work-ai"])
+        self.assertEqual(cm.exception.code, "error: backend 'cdoex' for command 'work-ai' is not one of codex, claude")
         self.assertIn("backend=cdoex (invalid; fix", format_status(
             installed_jobs(render_cron([6], "UTC", "work-ai", "codex", "/bin")), settings.load()))
-
-    def test_no_schedule_registers_for_yo_and_status_only(self):
-        # No tz/hours needed: nothing is planned. The section says so, and nothing reaches the crontab.
-        _, written = self.run_main(["--command", "claude-perso", "--backend", "claude", "--no-schedule"])
-        self.assertIsNone(written)
-        parser = settings.load()
-        self.assertEqual(dict(parser["claude-perso"]), {"backend": "claude", "schedule": "false"})
-        status = format_status([], parser)
-        self.assertIn("Registered for yo and --status only (schedule = false):\n  claude-perso\n", status)
-        self.assertNotIn("not installed", status)
-        with self.assertRaises(SystemExit) as cm:
-            self.run_main(["--refresh"])
-        self.assertIn("no scheduled commands", cm.exception.code)
-        # A stray block for it is reported as unmanaged rather than compared.
-        block = render_cron([6], "UTC", "claude-perso", "claude", "/bin")
-        self.assertIn("  settings: backend=claude schedule=off; this block is not managed by --refresh",
-                      format_status(installed_jobs(block), parser))
-        # Flipping it back schedules it and drops the key.
-        _, written = self.run_main(["--command", "claude-perso", "--tz", "UTC", "--hours", "9-18", "--schedule"])
-        self.assertIn("# >>> yo-claude-perso >>>", written)
-        self.assertNotIn("schedule", settings.load()["claude-perso"])
-        # And --no-schedule on a scheduled command removes its block along the way.
-        out, written = self.run_main(["--command", "claude-perso", "--no-schedule"], crontab=written)
-        self.assertEqual(written, "")
-        self.assertIn("existing yo-claude-perso cron block will be removed", out)
-        self.assertFalse(settings.load()["claude-perso"].getboolean("schedule"))
-
-    def test_refresh_regenerates_every_registered_block_and_keeps_the_rest(self):
-        _, codex_block = self.run_main(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex-pro",
-                                        "--backend", "codex"])
-        _, claude_block = self.run_main(["--hours", "19-23", "--command", "claude-perso", "--backend", "claude"])
-        stale_codex = codex_block.replace("* * * ", "* * 1 ", 1)  # drifted, as after a clock change
-        old_block = render_cron([6], "UTC", "old", "codex", "/bin")
-        crontab = "15 9 * * * echo mine\n" + stale_codex + old_block
-        _, written = self.run_main(["--refresh"], crontab=crontab)
-        self.assertTrue(written.startswith("15 9 * * * echo mine\n" + old_block))
-        self.assertIn(codex_block, written)
-        self.assertIn(claude_block, written)
-        self.assertNotIn("* * 1 ", written)
-
-    def test_refresh_without_registered_commands_is_an_error(self):
-        with self.assertRaises(SystemExit) as cm:
-            self.run_main(["--refresh"])
-        self.assertIn("no scheduled commands", cm.exception.code)
 
     def test_status_compares_each_block_with_its_settings(self):
         _, block = self.run_main(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex-pro",
@@ -598,11 +548,11 @@ class SettingsFlowTest(ScratchCase):
         described = "tz=Europe/Paris hours=9-18 windows=3x5h backend=codex"
         self.assertIn(f"  settings: {described} (in sync)\n", format_status(installed_jobs(block), parser))
         drifted = block.replace("* * * ", "* * 1 ", 1)
-        self.assertIn(f"  settings: {described} (differ from the crontab; run install.py --refresh)\n",
+        self.assertIn(f"  settings: {described} (differ from the crontab; run install.py --command codex-pro)\n",
                       format_status(installed_jobs(drifted), parser))
         text = format_status([], parser)
-        self.assertIn(f"Registered in {settings.settings_path()} but not installed (run install.py --refresh):\n"
-                      "  codex-pro\n", text)
+        self.assertIn(f"Registered in {settings.settings_path()} without a cron block:\n"
+                      "  codex-pro (to schedule: install.py --command codex-pro)\n", text)
 
     def test_remove_drops_the_block_and_the_section(self):
         _, block = self.run_main(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex-pro",
@@ -625,8 +575,7 @@ class SettingsFlowTest(ScratchCase):
             settings.save(parser)
             return "y"
 
-        for argv in (["--command", "codex"], ["--command", "codex", "--no-schedule"],
-                     ["--remove", "codex"], ["--refresh"]):
+        for argv in (["--command", "codex"], ["--remove", "codex"]):
             with self.subTest(argv=argv):
                 parser = settings.load()
                 parser.remove_section("other")

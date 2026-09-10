@@ -23,8 +23,8 @@ cd yo
 
 That's it — `cron` now pings on schedule, and what you asked for is kept in
 `~/.yo/settings.ini` (see [Settings](#settings)). Re-run `install.py` any time
-to change the hours or commands, `./install.py --refresh` after a clock change,
-or `./install.py --remove claude` to stop. See [Usage](#usage) for more.
+to change the hours or commands, or `./install.py --remove claude` to stop.
+See [Usage](#usage) for more.
 
 ## Components
 
@@ -166,11 +166,11 @@ matches the settings file, and its log location:
 For what the account's quota looks like right now, see
 [Quota status](#quota-status) (`./yo <command> --status`).
 
-To regenerate every scheduled command's block from the file, after a clock
+To regenerate a command's block from the file, after a clock
 change or a hand edit of the settings:
 
 ```sh
-./install.py --refresh
+./install.py --command codex
 ```
 
 To stop a command, remove its block and settings section, keeping other commands
@@ -184,7 +184,7 @@ A block installed under a name you've since renamed keeps firing until it's
 removed; `--status` lists it, so `--remove` it by its old name.
 
 See `./install.py --help` for `--window-hours`, `--num-windows`, `--probe`/
-`--no-probe`, `--no-schedule`, the persisted `--model`/`--effort`/
+`--no-probe`, the persisted `--model`/`--effort`/
 `--thread-source` overrides, and `--yes`.
 
 ### Settings
@@ -210,22 +210,15 @@ hours = 19-23
 
 - Per command: `backend`; `probe` (`--probe`/`--no-probe`; the codex default
   is on); optional `model`, `effort`, `thread_source` overrides, which `yo`
-  applies to that command's pings (a record then says `source: settings`);
-  `schedule = false` for a command registered for `yo` and `--status` only.
+  applies to that command's pings (a record then says `source: settings`).
 - Host-wide, overridable per command: `tz`, `hours`, `window_hours`,
   `num_windows`.
 
 `yo` reads these settings; its flags override them for one run. Registered
-commands need no `--backend`, and `--status` uses their `tz`. To register
-without scheduling:
-
-```sh
-./install.py --command claude-perso --backend claude --no-schedule
-./yo claude-perso --status                # no --backend needed
-```
-
-`--refresh` skips unscheduled commands; `--schedule` enables them once `tz`
-and `hours` are set. You can edit the INI file and run `--refresh` to apply it.
+commands need no `--backend`, and `--status` uses their `tz`. To register a
+command without cron (a laptop that must never get a crontab), add its section
+and `backend` directly to the INI file, creating `~/.yo/settings.ini` if needed.
+After editing schedule settings, run `./install.py --command NAME` to apply them.
 `DEFAULT` is reserved; rewrites discard comments. Credentials and profiles
 belong in the wrapper script, not this file.
 
@@ -324,8 +317,8 @@ Scheduled pings (claude): 06:00, 11:02, 16:04 Europe/Paris -> 04:00, 09:02, 14:0
 
 Because a static crontab can't follow daylight-saving transitions, the offset is
 fixed at install time. After the clocks change (or if you move the box to
-another timezone), run **`./install.py --refresh`** to re-anchor every
-schedule from the settings file; `--status` shows which blocks have drifted.
+another timezone), re-run **`./install.py --command NAME`** for each command
+to re-anchor its schedule; `--status` shows which blocks have drifted.
 
 ## Logs
 

@@ -11,9 +11,7 @@ SETTINGS_NAME = "settings.ini"
 DEFAULT_SECTION = configparser.DEFAULTSECT  # "DEFAULT": reserved, never a command name
 
 SCHEDULE_KEYS = ("tz", "hours", "window_hours", "num_windows")  # host-wide, per-command override
-COMMAND_KEYS = ("backend", "schedule", "probe", "model", "effort", "thread_source")  # per command
-# schedule = false registers a command for yo and --status without a cron block
-# (a laptop that must never get a crontab); --refresh skips it.
+COMMAND_KEYS = ("backend", "probe", "model", "effort", "thread_source")  # per command
 
 
 def home_dir():

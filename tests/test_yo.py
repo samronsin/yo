@@ -144,11 +144,6 @@ class DispatchTests(ScratchCase):
             self.assertEqual(exc.exception.code, 2)
             self.assertIn("backend 'cdoex' for command 'wrapper' is not one of codex, claude", err.getvalue())
             self.assertEqual((codex.call_count, claude.call_count), (2, 1))
-            # A status-only registration (schedule = false) serves yo the same way.
-            settings.update_command(parser, "wrapper", {"backend": "claude", "schedule": False})
-            settings.save(parser)
-            yo.main(["wrapper"])
-            self.assertEqual(claude.call_args.args[0].backend, "claude")
             # [DEFAULT] tz applies to unregistered commands too.
             parser[settings.DEFAULT_SECTION]["tz"] = "UTC"
             settings.save(parser)
