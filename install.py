@@ -146,6 +146,9 @@ def parse_args(argv=None):
     parser.add_argument("--backend", choices=BACKENDS,
                         help="Runner backend for a custom --command; a backend "
                              "name (codex/claude) is its own backend")
+    parser.add_argument("--schedule", action=argparse.BooleanOptionalAction, default=None,
+                        help="Install a cron block (the default); --no-schedule only registers the "
+                             "command for yo and --status, and drops any block it has")
     parser.add_argument("--probe", action=argparse.BooleanOptionalAction, default=None,
                         help="Verify and record each Codex ping (the default for the codex "
                              "backend; --no-probe schedules plain pings)")
@@ -159,7 +162,8 @@ def parse_args(argv=None):
     # the one flag an install always needs; the rest may come from the file.
     install_flags = (("--tz", args.tz), ("--hours", args.hours), ("--window-hours", args.window_hours),
                      ("--num-windows", args.num_windows), ("--command", args.command),
-                     ("--backend", args.backend), ("--probe/--no-probe", args.probe), ("--model", args.model),
+                     ("--backend", args.backend), ("--schedule/--no-schedule", args.schedule),
+                     ("--probe/--no-probe", args.probe), ("--model", args.model),
                      ("--effort", args.effort), ("--thread-source", args.thread_source))
     mode_flag = "--status" if args.status else "--remove" if args.remove else "--refresh" if args.refresh else None
     if mode_flag is None:
@@ -439,6 +443,10 @@ def effective_settings(parser, command, args=None):
             sys.exit(f"error: {command}: {key} = {raw!r} in {settings.settings_path()} must be a positive integer")
     if values["probe"] is not None and not isinstance(values["probe"], bool):
         values["probe"] = settings.to_bool(values["probe"])
+    if values["schedule"] is None:
+        values["schedule"] = True
+    elif not isinstance(values["schedule"], bool):
+        values["schedule"] = settings.to_bool(values["schedule"])
     return values
 
 
@@ -519,6 +527,9 @@ def settings_line(parser, command, entries):
     if not parser.has_section(command):
         return f"  settings: not registered; re-run install.py --command {command} ... to register it"
     values = effective_settings(parser, command)
+    if not values["schedule"]:
+        return (f"  settings: backend={values['backend']} schedule=off; this block is not managed by "
+                f"--refresh (drop it with --remove, or re-install with --schedule)")
     described = (f"tz={values['tz']} hours={values['hours']} "
                  f"windows={values['num_windows']}x{values['window_hours']}h backend={values['backend']}"
                  + ("" if values["probe"] is None else f" probe={'on' if values['probe'] else 'off'}"))
@@ -558,10 +569,15 @@ def format_status(jobs, parser=None):
                 settings_line(parser, command, entries),
                 f"  logs:     {log_dir / f'yo-{command}-<timestamp>.log'}",
                 f"  last:     {log_dir / f'yo-{command}.last.txt'}"]
-    missing = [command for command in registered if command not in installed]
+    absent = [command for command in registered if command not in installed]
+    missing = [command for command in absent if effective_settings(parser, command)["schedule"]]
+    unscheduled = [command for command in absent if command not in missing]
     if missing:
         out += ["", f"Registered in {settings.settings_path()} but not installed (run install.py --refresh):",
                 *(f"  {command}" for command in missing)]
+    if unscheduled:
+        out += ["", "Registered for yo and --status only (schedule = false):",
+                *(f"  {command}" for command in unscheduled)]
     return "\n".join(out) + "\n"
 
 
@@ -584,6 +600,8 @@ def install_schedule(args):
     parser = settings.load()
     command = args.command
     values = effective_settings(parser, command, args)
+    if not values["schedule"]:
+        return register_only(args, parser, crontab, command, values)
     backend, probe, cron_content, summary = plan_block(command, values)
     # Preflight: a malformed crontab should fail before the user approves anything.
     remove_managed_block(crontab, command)
@@ -597,6 +615,7 @@ def install_schedule(args):
         "backend": backend, "probe": args.probe, **{key: values[key] for key in settings.SCHEDULE_KEYS},
         "model": args.model, "effort": args.effort, "thread_source": args.thread_source,
     })
+    parser.remove_option(command, "schedule")  # scheduled is the default; only `false` is worth keeping
 
     print(summary)
     print(f"\nGenerated cron snippet:\n\n{cron_content}")
@@ -614,12 +633,41 @@ def install_schedule(args):
     print("Crontab and settings updated.")
 
 
+def register_only(args, parser, crontab, command, values):
+    """--no-schedule: record the command for yo and --status, and drop any block it has."""
+    try:
+        backend = resolve_backend(command, values["backend"])
+    except argparse.ArgumentTypeError as exc:
+        sys.exit(f"error: {exc}")
+    if values["tz"]:
+        check_tz(values["tz"])
+    cron_path_for([command])  # the command must still exist for yo to run it
+    block = remove_managed_block(crontab, command) != crontab.splitlines()  # also a malformed-crontab preflight
+    settings.update_command(parser, command, {
+        "backend": backend, "schedule": False, "tz": values["tz"], "probe": args.probe,
+        "model": args.model, "effort": args.effort, "thread_source": args.thread_source,
+    })
+    print(f"Registering {command} ({backend}) without a schedule: `yo {command}` and `yo {command} --status` "
+          f"need no --backend; --refresh leaves it alone.")
+    if block:
+        print(f"Its existing yo-{command} cron block will be removed.")
+    print(f"\nSettings ({settings.settings_path()}) after this:\n\n{settings.dump(parser)}", end="")
+    if not args.yes and not confirm("\nWrite this? [y/N] "):
+        sys.exit("Aborted; nothing changed.")
+    if block:
+        write_crontab(remove_managed_block(read_crontab(), command))
+        print(f"Crontab updated; yo-{command} block removed.")
+    settings.save(parser)
+    print("Settings updated.")
+
+
 def refresh_schedules(args):
-    """Regenerate every registered command's block from the settings file (the DST re-anchor)."""
+    """Regenerate every scheduled command's block from the settings file (the DST re-anchor)."""
     parser = settings.load()
-    commands = settings.commands(parser)
+    commands = [command for command in settings.commands(parser)
+                if effective_settings(parser, command)["schedule"]]
     if not commands:
-        sys.exit(f"error: no commands registered in {settings.settings_path()}; install one first")
+        sys.exit(f"error: no scheduled commands in {settings.settings_path()}; install one first")
     split_managed_blocks(read_crontab())  # preflight: refuse a malformed crontab before anything is shown
 
     blocks = []

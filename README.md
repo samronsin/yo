@@ -187,8 +187,8 @@ A block installed under a name you've since renamed keeps firing until it's
 removed; `--status` lists it, so `--remove` it by its old name.
 
 See `./install.py --help` for `--window-hours`, `--num-windows`, `--probe`/
-`--no-probe`, the persisted `--model`/`--effort`/`--thread-source` overrides,
-and `--yes`.
+`--no-probe`, `--no-schedule`, the persisted `--model`/`--effort`/
+`--thread-source` overrides, and `--yes`.
 
 ### Settings
 
@@ -214,12 +214,22 @@ hours = 19-23
 
 - Per command: `backend`; `probe` (`--probe`/`--no-probe`; the codex default
   is on); optional `model`, `effort`, `thread_source` overrides, which `yo`
-  applies to that command's pings (a record then says `source: settings`).
+  applies to that command's pings (a record then says `source: settings`);
+  `schedule = false` for a command registered for `yo` and `--status` only.
 - Host-wide, overridable per command: `tz`, `hours`, `window_hours`,
   `num_windows`.
 
 A registered command needs no `--backend` on `yo`, `--status` renders in its
-`tz`, and `--refresh` rebuilds its block. The file is plain INI: edit it by
+`tz`, and `--refresh` rebuilds its block. On a machine that must never get a
+crontab (a laptop), register the logins without one:
+
+```sh
+./install.py --command claude-perso --backend claude --no-schedule
+./yo claude-perso --status                # no --backend needed
+```
+
+`--refresh` skips such a command, `install.py --status` lists it apart, and
+re-running the install with `--schedule` (and a `--tz`/`--hours`) schedules it. The file is plain INI: edit it by
 hand, then `--refresh`. Section names are command names (`DEFAULT` is
 reserved), values are strings, and comments are lost when `install.py` rewrites
 the file. Nothing about credentials or profiles goes here: the wrapper script

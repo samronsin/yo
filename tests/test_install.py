@@ -565,6 +565,34 @@ class SettingsFlowTest(unittest.TestCase):
         self.assertIn("backend=cdoex (invalid; fix", format_status([], settings.load()) + format_status(
             installed_jobs(render_cron([6], "UTC", "work-ai", "codex", "/bin")), settings.load()))
 
+    def test_no_schedule_registers_for_yo_and_status_only(self):
+        # No tz/hours needed: nothing is planned. The section says so, and nothing reaches the crontab.
+        out, written = self.run_main(["--command", "claude-perso", "--backend", "claude", "--no-schedule"])
+        self.assertIsNone(written)
+        self.assertEqual(self.file_text(), "[claude-perso]\nbackend = claude\nschedule = false\n\n")
+        self.assertIn("without a schedule", out)
+        self.assertIn("Settings updated.", out)
+        parser = settings.load()
+        status = format_status([], parser)
+        self.assertIn("Registered for yo and --status only (schedule = false):\n  claude-perso\n", status)
+        self.assertNotIn("not installed", status)
+        with self.assertRaises(SystemExit) as cm:
+            self.run_main(["--refresh"])
+        self.assertIn("no scheduled commands", cm.exception.code)
+        # A stray block for it is reported as unmanaged rather than compared.
+        block = render_cron([6], "UTC", "claude-perso", "claude", "/bin")
+        self.assertIn("  settings: backend=claude schedule=off; this block is not managed by --refresh",
+                      format_status(installed_jobs(block), parser))
+        # Flipping it back schedules it and drops the key.
+        _, written = self.run_main(["--command", "claude-perso", "--tz", "UTC", "--hours", "9-18", "--schedule"])
+        self.assertIn("# >>> yo-claude-perso >>>", written)
+        self.assertNotIn("schedule", self.file_text())
+        # And --no-schedule on a scheduled command removes its block along the way.
+        out, written = self.run_main(["--command", "claude-perso", "--no-schedule"], crontab=written)
+        self.assertEqual(written, "")
+        self.assertIn("existing yo-claude-perso cron block will be removed", out)
+        self.assertIn("schedule = false", self.file_text())
+
     def test_refresh_regenerates_every_registered_block_and_keeps_the_rest(self):
         _, codex_block = self.run_main(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex-pro",
                                         "--backend", "codex"])
@@ -584,7 +612,7 @@ class SettingsFlowTest(unittest.TestCase):
     def test_refresh_without_registered_commands_is_an_error(self):
         with self.assertRaises(SystemExit) as cm:
             self.run_main(["--refresh"])
-        self.assertIn("no commands registered", cm.exception.code)
+        self.assertIn("no scheduled commands", cm.exception.code)
 
     def test_status_compares_each_block_with_its_settings(self):
         _, block = self.run_main(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex-pro",
