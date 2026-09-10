@@ -137,6 +137,14 @@ class DispatchTests(ScratchCase):
             with redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
                 yo.main(["other"])
             self.assertIn("install.py --command other --backend", err.getvalue())
+            # A misspelt backend in the file is a usage error, never a silent fallback to a runner.
+            settings.update_command(parser, "wrapper", {"backend": "cdoex"})
+            settings.save(parser)
+            with redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit) as exc:
+                yo.main(["wrapper"])
+            self.assertEqual(exc.exception.code, 2)
+            self.assertIn("backend 'cdoex' for command 'wrapper' is not one of codex, claude", err.getvalue())
+            self.assertEqual((codex.call_count, claude.call_count), (2, 1))
             # [DEFAULT] tz applies to unregistered commands too.
             parser[settings.DEFAULT_SECTION]["tz"] = "UTC"
             settings.save(parser)

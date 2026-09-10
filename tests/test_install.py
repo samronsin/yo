@@ -159,6 +159,13 @@ class ResolveBackendTest(unittest.TestCase):
         with self.assertRaisesRegex(argparse.ArgumentTypeError, "pass --backend"):
             resolve_backend("work-ai", None)
 
+    def test_unknown_backend_is_an_argument_error(self):
+        # argparse's choices never let a bad flag through; a hand-edited settings file can.
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "backend 'cdoex' for command 'work-ai' is not one of codex, claude"):
+            resolve_backend("work-ai", "cdoex")
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "drop --backend"):
+            resolve_backend("codex", "cdoex")  # a bare backend name still wins the conflict message
+
 
 class ParseArgsTest(unittest.TestCase):
     def test_probe_is_a_tri_state_install_option(self):
@@ -545,6 +552,18 @@ class SettingsFlowTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             self.run_main(["--command", "codex"])
         self.assertIn("num_windows = 'many'", cm.exception.code)
+
+    def test_misspelt_backend_in_the_file_stops_install_refresh_and_marks_status(self):
+        parser = settings.load()
+        settings.seed_defaults(parser, {"tz": "UTC", "hours": "9-18"})
+        settings.update_command(parser, "work-ai", {"backend": "cdoex"})
+        settings.save(parser)
+        for argv in (["--command", "work-ai"], ["--refresh"]):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit) as cm:
+                self.run_main(argv)
+            self.assertEqual(cm.exception.code, "error: backend 'cdoex' for command 'work-ai' is not one of codex, claude")
+        self.assertIn("backend=cdoex (invalid; fix", format_status([], settings.load()) + format_status(
+            installed_jobs(render_cron([6], "UTC", "work-ai", "codex", "/bin")), settings.load()))
 
     def test_refresh_regenerates_every_registered_block_and_keeps_the_rest(self):
         _, codex_block = self.run_main(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex-pro",

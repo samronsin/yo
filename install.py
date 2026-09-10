@@ -102,8 +102,10 @@ def resolve_backend(command, backend):
         The resolved backend name.
 
     Raises:
-        argparse.ArgumentTypeError: when it can't be decided; callers turn it
-            into their own usage error (yo's parser, install.py's exit).
+        argparse.ArgumentTypeError: when it can't be decided, or `backend` is
+            not a known backend (argparse's choices catch a bad flag, but a
+            value read from the settings file arrives here unchecked); callers
+            turn it into their own usage error (yo's parser, install.py's exit).
     """
     if command in BACKENDS:
         if backend is not None and backend != command:
@@ -111,6 +113,8 @@ def resolve_backend(command, backend):
         return command
     if backend is None:
         raise argparse.ArgumentTypeError(f"'{command}' is a custom command; pass --backend codex|claude")
+    if backend not in BACKENDS:
+        raise argparse.ArgumentTypeError(f"backend '{backend}' for command '{command}' is not one of {', '.join(BACKENDS)}")
     return backend
 
 
