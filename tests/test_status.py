@@ -148,9 +148,21 @@ class ParseResetTests(unittest.TestCase):
 
 
 class LastRunTests(ScratchCase):
-    def write_log(self, stamp, *lines):
+    def write_log(self, stamp, *lines, command="my-cmd"):
         self.root.mkdir(exist_ok=True)
-        (self.root / f"yo-my-cmd-{stamp}.log").write_text("".join(line + "\n" for line in lines))
+        (self.root / f"yo-{command}-{stamp}.log").write_text("".join(line + "\n" for line in lines))
+
+    def test_a_wrapper_sharing_the_prefix_is_not_confused_with_the_command(self):
+        # "yo-my-cmd-pro-<older>" sorts after "yo-my-cmd-<newer>" whatever the dates.
+        self.write_log("20260910T040004Z", "[x] yo start", "[x] yo end rc=0")
+        self.write_log("20260901T040004Z", "[x] yo start", "[x] yo end rc=7", command="my-cmd-pro")
+        self.write_log("20260909T040004Z", "[x] yo start", "[x] yo end rc=5", command="my-cmd-2")
+        self.assertEqual([p.name for p in codex_runner.run_logs("my-cmd", self.root)],
+                         ["yo-my-cmd-20260910T040004Z.log"])
+        self.assertEqual(status.last_run("my-cmd", self.root)["returncode"], 0)
+        self.assertEqual(status.last_run("my-cmd-pro", self.root)["returncode"], 7)
+        self.assertEqual(status.last_run("my-cmd-2", self.root)["returncode"], 5)
+        self.assertEqual(codex_runner.load_records("my-cmd", self.root), [])
 
     def test_newest_log_with_status_and_verdict(self):
         self.write_log("20260910T040004Z", "[x] yo start", "agent=my-cmd", "[x] yo end rc=3",

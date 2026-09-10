@@ -182,8 +182,16 @@ def quota(command):
 
 
 def run_logs(command, log_dir=None):
-    """This command's run logs, oldest first (the name carries the UTC timestamp)."""
-    return sorted((log_dir or ROOT_DIR / "logs").glob(f"yo-{command}-*.log"))
+    """This command's run logs, oldest first (the name carries the UTC timestamp).
+
+    The name is yo-<command>-<stamp>.log (see open_run_log), and command names
+    may contain dashes, so a glob on the prefix alone would hand `codex` the
+    logs of `codex-pro` too; only names where the stamp follows the exact
+    command count.
+    """
+    name = re.compile(rf"yo-{re.escape(command)}-\d{{8}}T\d{{6}}Z\.log")
+    return sorted(path for path in (log_dir or ROOT_DIR / "logs").glob(f"yo-{command}-*.log")
+                  if name.fullmatch(path.name))
 
 
 def load_records(command, log_dir=None):
