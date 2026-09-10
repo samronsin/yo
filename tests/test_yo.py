@@ -12,11 +12,10 @@ import time
 import unittest
 from unittest import mock
 
-from test_codex_runner import ScratchCase
+from tests.support import REPO_ROOT, ScratchCase
 from utils import claude_runner, codex_anchor_probe as anchor, codex_runner
 
-SOURCE = Path(__file__).resolve().parent
-SPEC = spec_from_loader("yo_cli", SourceFileLoader("yo_cli", str(SOURCE / "yo")))
+SPEC = spec_from_loader("yo_cli", SourceFileLoader("yo_cli", str(REPO_ROOT / "yo")))
 yo = module_from_spec(SPEC)
 SPEC.loader.exec_module(yo)
 
@@ -121,8 +120,8 @@ class DispatchTests(ScratchCase):
         repo = self.root / "repo"
         repo.mkdir()
         for name in ("yo", "install.py"):
-            shutil.copy(SOURCE / name, repo / name)
-        shutil.copytree(SOURCE / "utils", repo / "utils", ignore=shutil.ignore_patterns("__pycache__"))
+            shutil.copy(REPO_ROOT / name, repo / name)
+        shutil.copytree(REPO_ROOT / "utils", repo / "utils", ignore=shutil.ignore_patterns("__pycache__"))
         (self.root / "yo").symlink_to(repo / "yo")
         result = subprocess.run(["yo", "wrapper", "--backend", "codex"], cwd=self.root,
                                 env=self.env, capture_output=True, text=True, timeout=30)

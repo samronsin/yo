@@ -6,12 +6,11 @@ import io
 import json
 import os
 from pathlib import Path
-import shutil
-import tempfile
 import time
 import unittest
 from unittest import mock
 
+from tests.support import ScratchCase
 from utils import codex_anchor_probe as anchor
 from utils import codex_runner as runner
 
@@ -24,34 +23,6 @@ def args_for(**overrides):
     base = dict(command="wrapper", backend="codex", model="", effort="", thread_source="", probe=True)
     base.update(overrides)
     return argparse.Namespace(**base)
-
-
-class ScratchCase(unittest.TestCase):
-    """A scratch directory per test, plus mocks that are undone automatically."""
-
-    def setUp(self):
-        temp = tempfile.TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
-
-    def patch(self, target, attribute, *args, **kwargs):
-        patcher = mock.patch.object(target, attribute, *args, **kwargs)
-        self.addCleanup(patcher.stop)
-        return patcher.start()
-
-    def install_fake_cli(self):
-        """The fake Codex CLI on PATH as `wrapper`, recording its argv to a file."""
-        cli = self.root / "wrapper"
-        shutil.copy(Path(__file__).resolve().parent / "tests/fixtures/fake_codex.py", cli)
-        cli.chmod(0o755)
-        self.argv = self.root / "argv.json"
-        self.env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}", FAKE_CODEX_ARGV=str(self.argv))
-        self.env.pop("CODEX_HOME", None)
-
-    def sent_argv(self):
-        argv = json.loads(self.argv.read_text())
-        self.argv.unlink()
-        return argv
 
 
 class ProbeTests(ScratchCase):

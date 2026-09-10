@@ -46,7 +46,7 @@ the hours or commands, or `./install.py --remove claude` to stop. See
   Codex invocation and, with `--probe`, verifies and records the ping.
 - **`utils/claude_runner.py`** — the Claude backend: sends a plain ping and
   writes its output and exit status to the run log.
-- **`test_install.py`**, **`test_codex_runner.py`**, **`test_yo.py`** — tests.
+- **`tests/`** — the test suite (`python3 -m unittest` from the repo root).
 
 ## Usage
 
