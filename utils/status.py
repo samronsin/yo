@@ -1,10 +1,4 @@
-"""`yo <command> --status`: the account's quota windows and the last run, per backend.
-
-Each backend answers quota() in its runner module, using the CLI's own
-token-free read (Codex: `app-server`, Claude: headless `/usage`), so a status
-read never spends a model turn and cannot anchor a window itself. This module
-adds what both share (the last run log) and renders the report.
-"""
+"""`yo <command> --status`: read backend quota windows and render them with the last run."""
 import datetime
 import json
 import re
@@ -81,10 +75,8 @@ def format_report(out):
     rows = []
     if quota is None:
         rows.append(("quota", f"unavailable: {out.get('error', 'unknown error')}"))
-    elif out["backend"] == "codex":
-        rows += codex_rows(quota, now)
     else:
-        rows += claude_rows(quota, now)
+        rows += quota_rows(quota, now)
     run = out["last_run"]
     if run is None:
         rows.append(("last run", "none (no run logs)"))
@@ -102,11 +94,7 @@ def format_report(out):
 
 
 def five_hour_text(state, used, resets_at, now, resets_text=None):
-    """The 5h window's row, the same shape for both backends.
-
-    `state` is "active", "idle" or "unknown"; `resets_at` an epoch time or None
-    (then `resets_text` is shown as printed by the CLI).
-    """
+    """Render an active, idle or unknown window; fall back to the CLI's reset text."""
     parts = {"active": ["open"], "idle": ["idle, no window open"],
              "unknown": ["open or idle? cannot tell"]}[state]
     parts.append(f"{percent(used)} used")
@@ -139,25 +127,13 @@ def window_label(minutes, scope=None):
     return f"{label} ({scope})" if scope else label
 
 
-def codex_rows(quota, now):
+def quota_rows(quota, now):
+    """Rows for a runner's quota() result (both runners return the same shape)."""
     five = quota["five_hour"]
-    rows = [("5h window", "not reported by the account" if five is None
-             else five_hour_text(five["state"], five["used_percent"], five["resets_at"], now))]
-    rows += [(window_label(window.get("window_minutes")), window_text(window["used_percent"], window.get("resets_at")))
-             for window in quota["weekly"]]
-    return rows
-
-
-def claude_rows(quota, now):
-    """Claude's view has no idle/active flag: usage above 0% proves a live window, 0% leaves it open."""
-    five = quota["five_hour"]
-    if five is None:
-        rows = [("5h window", "not reported by /usage")]
-    else:
-        state = "active" if (five["used_percent"] or 0) > 0 else "unknown"
-        rows = [("5h window", five_hour_text(state, five["used_percent"], five["resets_at"], now, five["resets"]))]
-    rows += [(window_label(7 * 24 * 60, None if window["scope"] == "all models" else window["scope"]),
-              window_text(window["used_percent"], window["resets_at"], window["resets"]))
+    rows = [("5h window", "not reported" if five is None else
+             five_hour_text(five["state"], five["used_percent"], five["resets_at"], now, five.get("resets")))]
+    rows += [(window_label(window.get("window_minutes"), window.get("scope")),
+              window_text(window["used_percent"], window.get("resets_at"), window.get("resets")))
              for window in quota["weekly"]]
     if quota.get("spent_turns"):
         rows.append(("warning", f"the /usage call spent {quota['spent_turns']} model turn(s); "

@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""Send a ping through Codex or Claude, optionally probing Codex's quota window.
-
-With --status, report the account's quota windows and the last run instead.
-"""
+"""Ping Codex or Claude, probe Codex's window, or read quota and last-run status."""
 import argparse
 import subprocess
 import sys
@@ -12,8 +9,7 @@ from utils import claude_runner, codex_runner, status
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("command", type=command_name)
     parser.add_argument("--backend", choices=BACKENDS)
     for name in ("model", "effort", "thread-source"):
@@ -27,10 +23,8 @@ def main(argv=None):
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
     if args.status:
-        # A status read sends nothing, so the ping's knobs have no meaning with it.
-        given = [flag for flag, value in (("--probe", args.probe), ("--model", args.model),
-                                          ("--effort", args.effort), ("--thread-source", args.thread_source))
-                 if value]
+        given = [f"--{name.replace('_', '-')}" for name in ("probe", "model", "effort", "thread_source")
+                 if getattr(args, name)]
         if given:
             parser.error(f"--status cannot be combined with {', '.join(given)}")
     if args.probe and args.backend != "codex":

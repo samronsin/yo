@@ -151,15 +151,7 @@ def cli_version(command):
 
 
 def quota(command):
-    """The account's quota windows via `<command> app-server`, for `yo --status`.
-
-    One read settles every window but the 5h one, which may need a second read
-    PRE_WAIT_SECS later to tell a fresh window from the drifting hypothetical
-    reset an idle account reports (codex_anchor_probe.window_reads). Returns
-    {"five_hour": {"state", "used_percent", "resets_at", "anchored_at", "reads"}
-    or None when the account reports no 5h window, "weekly": [{"window_minutes",
-    "used_percent", "resets_at"}...] for the other windows it does report}.
-    """
+    """Read quota windows via app-server, resolving ambiguous 5h state with window_reads()."""
     payload = read_limits_payload(command=command)
     out = {"five_hour": None, "weekly": []}
     try:
@@ -182,13 +174,7 @@ def quota(command):
 
 
 def run_logs(command, log_dir=None):
-    """This command's run logs, oldest first (the name carries the UTC timestamp).
-
-    The name is yo-<command>-<stamp>.log (see open_run_log), and command names
-    may contain dashes, so a glob on the prefix alone would hand `codex` the
-    logs of `codex-pro` too; only names where the stamp follows the exact
-    command count.
-    """
+    """Exact command's timestamped run logs, oldest first; exclude wrappers sharing its prefix."""
     name = re.compile(rf"yo-{re.escape(command)}-\d{{8}}T\d{{6}}Z\.log")
     return sorted(path for path in (log_dir or ROOT_DIR / "logs").glob(f"yo-{command}-*.log")
                   if name.fullmatch(path.name))
@@ -254,4 +240,3 @@ def run(args):
         if record["outcome"] == "execution_error":
             return record.get("returncode") or 2
         return EXIT_CODES.get(record["outcome"], 2)
-

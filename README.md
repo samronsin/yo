@@ -63,11 +63,8 @@ Run once, ad hoc:
 
 ### Quota status
 
-The web UIs are a poor place to check what a ping did: Codex's hides windows
-at 0% usage, and neither shows when a window was anchored. `--status` reads
-the account's quota through the CLI itself, so it costs no tokens and cannot
-anchor a window of its own. It takes the same command and `--backend` as a
-ping, and none of the ping's other flags:
+`--status` reads quota windows through the CLI and shows the last run.
+It accepts the same command and `--backend` as a ping, but no ping flags:
 
 ```sh
 ./yo codex --status                       # Codex login, via `codex app-server`
@@ -81,26 +78,17 @@ codex (codex), read 2026-09-10 13:44 CEST
   last run    2026-09-10 06:00 CEST, anchored (default), rc=0, /srv/yo/logs/yo-codex-20260910T040004Z.log
 ```
 
-- **Codex** takes the same `account/rateLimits/read` the probe uses. The 5h
-  line says whether a window is open (`open`), nothing is (`idle`), or the
-  account is at 0% with a reset near now+5h, which a single read cannot
-  settle; then a second read 15s later decides, exactly as before a probed
-  ping. `anchored` is the reset minus five hours. Every other window the
-  account reports (the weekly one) is listed with its usage and reset.
-- **Claude** runs `<command> --print --output-format json "/usage"`, which
-  Claude Code answers without a model turn (its result envelope reports zero
-  turns and zero tokens). The view is prose, so `yo` parses the session and
-  weekly lines (one per model scope) and renders them in the same shape as
-  Codex's; a reset time it cannot parse is shown as Claude printed it. Claude
-  reports no open/idle flag: usage above 0% proves a live window, at 0% the
-  row says so. Its reset times have minute precision, enough for status but
-  too coarse for anchoring verdicts, which is why `--probe` stays Codex-only.
-- **last run** is the newest `yo-<command>-*.log`: when it started, its exit
-  status, and the probe verdict when it has one.
+- **Codex** uses the probe's token-free quota read. An ambiguous 5h window
+  needs a second read after 15 seconds to distinguish `open` from `idle`.
+- **Claude** uses headless `/usage` (zero model turns on Claude Code 2.1.265;
+  a warning appears if a version spends turns). Positive usage means `open`;
+  zero is ambiguous. Unrecognized reset dates are shown as printed by the CLI.
+- **Anchored** is the reset minus five hours. Claude's minute-precision resets
+  are too coarse for `--probe`, which remains Codex-only.
+- **Last run** shows the newest log for the exact command: start time, exit
+  status, and probe verdict when available.
 
-Exit status is `0` when the quota was read and `1` when it could not be (the
-report still prints what it has, with the error). Reading takes a couple of
-seconds per command, since each read spawns the CLI.
+Exit status is `0` on a successful quota read, or `1` with an error in the report.
 
 ### Recorded Codex pings
 
