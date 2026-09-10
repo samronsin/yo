@@ -132,8 +132,13 @@ class ParseResetTests(unittest.TestCase):
         january = datetime(2027, 1, 5, tzinfo=paris).timestamp()  # a stale reset read just after New Year
         self.assertEqual(claude_runner.parse_reset("Dec 30 at 12pm (Europe/Paris)", now=january),
                          datetime(2026, 12, 30, 12, 0, tzinfo=paris).timestamp())
-        self.assertEqual(claude_runner.parse_reset("Sep 10 at 4:30pm (UTC)", now=self.NOW),
-                         datetime(2026, 9, 10, 16, 30, tzinfo=ZoneInfo("UTC")).timestamp())
+        utc = datetime(2026, 9, 10, 14, 30, tzinfo=ZoneInfo("UTC")).timestamp()
+        for text in ("Sep 10 at 2:30pm (UTC)", "Sep 10, 2:30pm (UTC)", "Sep 10, 2026, 2:30 PM (UTC)",
+                     "Sep 10 2026 at 2:30pm (UTC)"):
+            with self.subTest(text=text):
+                self.assertEqual(claude_runner.parse_reset(text, now=self.NOW), utc)
+        self.assertEqual(claude_runner.parse_reset("Sep 10, 2025, 2:30pm (UTC)", now=self.NOW),
+                         utc - 365 * 86400)  # an explicit year is not second-guessed
 
     def test_unknown_shapes_give_none(self):
         for text in ("soon", "Sep 10 at 16:30 (Europe/Paris)", "Sep 10 at 4:30pm (Mars/Olympus)",

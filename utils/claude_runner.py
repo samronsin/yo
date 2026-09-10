@@ -61,31 +61,36 @@ def _number(text):
     return int(value) if value.is_integer() else value
 
 
-# "Sep 10 at 4:30pm (Europe/Paris)", "Sep 14 at 5am (Europe/Paris)": month-day,
-# 12h clock with optional minutes, IANA zone in parentheses. No year.
-RESET_RE = re.compile(r"^([A-Z][a-z]{2}) (\d{1,2}) at (\d{1,2})(?::(\d{2}))?(am|pm) \((\S+)\)$")
+# Shapes seen from Claude Code 2.1.x: "Sep 10 at 4:30pm (Europe/Paris)" and
+# "Sep 14 at 5am (Europe/Paris)" on one machine, "Sep 10, 2:30pm (UTC)" on
+# another. Month-day, optional year, "at" or a comma, 12h clock with optional
+# minutes and optional space before am/pm, IANA zone in parentheses.
+RESET_RE = re.compile(r"^([A-Z][a-z]{2}) (\d{1,2})(?:,? (\d{4}))?(?: at|,) (\d{1,2})(?::(\d{2}))? ?([AaPp][Mm]) \((\S+)\)$")
 
 
 def parse_reset(text, now=None):
     """The epoch time of a /usage reset string, or None when it is not in the known shape.
 
-    The string carries no year, so the one that puts the reset closest to `now`
-    is used (a late-December read of a January reset lands in the next year).
+    The string usually carries no year, so the one that puts the reset closest
+    to `now` is used (a late-December read of a January reset lands in the next
+    year); an explicit year wins.
     """
     m = RESET_RE.match(text.strip())
     if not m:
         return None
+    month_name, day, year, hour, minute, meridiem, zone_name = m.groups()
     try:
-        zone = ZoneInfo(m[6])
-        month = datetime.datetime.strptime(m[1], "%b").month
+        zone = ZoneInfo(zone_name)
+        month = datetime.datetime.strptime(month_name, "%b").month
     except (ZoneInfoNotFoundError, ValueError):
         return None
-    hour = int(m[3]) % 12 + (12 if m[5] == "pm" else 0)
+    hour = int(hour) % 12 + (12 if meridiem.lower() == "pm" else 0)
     now = datetime.datetime.now(zone) if now is None else datetime.datetime.fromtimestamp(now, zone)
+    years = [int(year)] if year else [now.year - 1, now.year, now.year + 1]
     candidates = []
-    for year in (now.year - 1, now.year, now.year + 1):
+    for candidate in years:
         try:
-            candidates.append(datetime.datetime(year, month, int(m[2]), hour, int(m[4] or 0), tzinfo=zone))
+            candidates.append(datetime.datetime(candidate, month, int(day), hour, int(minute or 0), tzinfo=zone))
         except ValueError:  # Feb 29 in a non-leap year
             continue
     return min(candidates, key=lambda dt: abs(dt - now)).timestamp() if candidates else None
