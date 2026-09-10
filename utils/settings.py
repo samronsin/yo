@@ -52,10 +52,6 @@ def dump(parser):
     return out.getvalue()
 
 
-def to_bool(text):
-    return str(text).strip().lower() in ("1", "true", "yes", "on")
-
-
 def seed_defaults(parser, values):
     """Fill [DEFAULT] with the values it lacks (the first install seeds the host defaults)."""
     for key, value in values.items():

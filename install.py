@@ -423,8 +423,11 @@ def effective_settings(parser, command, args=None):
             values[key] = positive_int(raw)
         except (argparse.ArgumentTypeError, ValueError):
             sys.exit(f"error: {command}: {key} = {raw!r} in {settings.settings_path()} must be a positive integer")
-    if values["probe"] is not None and not isinstance(values["probe"], bool):
-        values["probe"] = settings.to_bool(values["probe"])
+    if values["probe"] is not None and not isinstance(values["probe"], bool):  # from the file, as text
+        try:
+            values["probe"] = section.getboolean("probe")
+        except ValueError:
+            sys.exit(f"error: {command}: probe = {values['probe']!r} in {settings.settings_path()} must be true or false")
     return values
 
 
@@ -496,7 +499,10 @@ def settings_line(parser, command, entries):
     """The `settings:` row of --status for an installed block: in sync, out of date, or unregistered."""
     if not parser.has_section(command):
         return f"  settings: not registered; re-run install.py --command {command} ... to register it"
-    values = effective_settings(parser, command)
+    try:
+        values = effective_settings(parser, command)
+    except SystemExit as exc:  # a value that does not convert; the message names it
+        return f"  settings: invalid; {str(exc.code).removeprefix(f'error: {command}: ')}"
     described = (f"tz={values['tz']} hours={values['hours']} "
                  f"windows={values['num_windows']}x{values['window_hours']}h backend={values['backend']}"
                  + ("" if values["probe"] is None else f" probe={'on' if values['probe'] else 'off'}"))

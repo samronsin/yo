@@ -523,12 +523,20 @@ class SettingsFlowTest(ScratchCase):
         self.assertFalse(settings.settings_path().exists())
 
     def test_bad_values_in_the_file_are_reported(self):
-        parser = settings.load()
-        settings.update_command(parser, "codex", {"backend": "codex", "tz": "UTC", "hours": "9-18", "num_windows": "many"})
-        settings.save(parser)
-        with self.assertRaises(SystemExit) as cm:
-            self.run_main(["--command", "codex"])
-        self.assertIn("num_windows = 'many'", cm.exception.code)
+        # A typo in the file is an error, never a silent default (a misspelt probe would
+        # otherwise quietly turn verified pings into plain ones).
+        for key, value, message in (("num_windows", "many", "num_windows = 'many'"),
+                                    ("probe", "ture", "probe = 'ture'")):
+            with self.subTest(key=key):
+                parser = settings.load()
+                parser.remove_section("codex")
+                settings.update_command(parser, "codex", {"backend": "codex", "tz": "UTC", "hours": "9-18", key: value})
+                settings.save(parser)
+                with self.assertRaises(SystemExit) as cm:
+                    self.run_main(["--command", "codex"])
+                self.assertIn(message, cm.exception.code)
+                status = format_status(installed_jobs(render_cron([6], "UTC", "codex", "codex", "/bin")), settings.load())
+                self.assertIn(f"  settings: invalid; {message}", status)  # --status survives and names the value
 
     def test_misspelt_backend_in_the_file_stops_install_and_marks_status(self):
         parser = settings.load()
