@@ -12,7 +12,7 @@ import time
 import unittest
 from unittest import mock
 
-from tests.support import REPO_ROOT, ScratchCase
+from tests.fixtures.scratch import REPO_ROOT, ScratchCase
 from utils import claude_runner, codex_anchor_probe as anchor, codex_runner
 
 SPEC = spec_from_loader("yo_cli", SourceFileLoader("yo_cli", str(REPO_ROOT / "yo")))

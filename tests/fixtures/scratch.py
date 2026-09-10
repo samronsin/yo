@@ -7,8 +7,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-FAKE_CODEX = Path(__file__).resolve().parent / "fixtures" / "fake_codex.py"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+FAKE_CODEX = Path(__file__).resolve().with_name("fake_codex.py")
 
 
 class ScratchCase(unittest.TestCase):
