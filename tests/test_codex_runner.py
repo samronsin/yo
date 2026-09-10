@@ -5,7 +5,6 @@ import fcntl
 import io
 import json
 import os
-from pathlib import Path
 import time
 import unittest
 from unittest import mock
