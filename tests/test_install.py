@@ -490,20 +490,22 @@ class SettingsFlowTest(ScratchCase):
             install.main(install.parse_args(argv))
         return out.getvalue(), (run.call_args.kwargs["input"] if run.called else None)
 
-    def test_install_persists_the_flags_and_seeds_the_host_defaults(self):
+    def test_install_persists_a_complete_section(self):
         _, written = self.run_main(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex-pro",
                                       "--backend", "codex"])
-        parser = settings.load()
-        self.assertEqual(parser.defaults(), {"tz": "Europe/Paris", "hours": "9-18",
-                                            "window_hours": "5", "num_windows": "3"})
-        self.assertEqual(parser["codex-pro"]["backend"], "codex")
+        self.assertEqual(dict(settings.load()["codex-pro"]),
+                         {"backend": "codex", "tz": "Europe/Paris", "hours": "9-18",
+                          "window_hours": "5", "num_windows": "3"})
         self.assertIn(f" {install.JOB_CMD} codex-pro --backend codex --probe\n", written)
 
     def test_omitted_flags_come_from_the_file_and_given_flags_win(self):
         _, first = self.run_main(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex-pro",
                                   "--backend", "codex"])
-        # A second command: tz from [DEFAULT], its own hours recorded as an override.
-        self.run_main(["--hours", "19-23", "--command", "claude-perso", "--backend", "claude"])
+        # A second command states its own schedule; nothing is inherited from the first.
+        with self.assertRaises(SystemExit) as cm:
+            self.run_main(["--hours", "19-23", "--command", "claude-perso", "--backend", "claude"])
+        self.assertIn("--tz not given", cm.exception.code)
+        self.run_main(["--tz", "UTC", "--hours", "19-23", "--command", "claude-perso", "--backend", "claude"])
         self.assertEqual(settings.load()["claude-perso"]["hours"], "19-23")
         # Re-installing with nothing but the name reproduces the block from the file.
         _, again = self.run_main(["--command", "codex-pro"])
@@ -540,8 +542,7 @@ class SettingsFlowTest(ScratchCase):
 
     def test_misspelt_backend_in_the_file_stops_install_and_marks_status(self):
         parser = settings.load()
-        settings.seed_defaults(parser, {"tz": "UTC", "hours": "9-18"})
-        settings.update_command(parser, "work-ai", {"backend": "cdoex"})
+        settings.update_command(parser, "work-ai", {"backend": "cdoex", "tz": "UTC", "hours": "9-18"})
         settings.save(parser)
         with self.assertRaises(SystemExit) as cm:
             self.run_main(["--command", "work-ai"])

@@ -409,8 +409,8 @@ def installed_jobs(crontab):
 
 
 def effective_settings(parser, command, args=None):
-    """Merge flags over the command's settings over defaults; convert integers and booleans."""
-    section = parser[command] if parser.has_section(command) else parser[settings.DEFAULT_SECTION]
+    """Merge flags over the command's section over built-in defaults; convert integers and booleans."""
+    section = parser[command] if parser.has_section(command) else {}
     flags = vars(args) if args is not None else {}
 
     def pick(key):
@@ -571,11 +571,9 @@ def install_schedule(args):
     # Preflight: a malformed crontab should fail before the user approves anything.
     remove_managed_block(crontab, command)
 
-    # Persist what this install used: the first install seeds the host-wide
-    # [DEFAULT]; a command repeats a schedule value only where it differs. The
-    # backend is always the command's own; probe and the model overrides only
-    # when given (drop a persisted one by editing the file).
-    settings.seed_defaults(parser, {key: values[key] for key in settings.SCHEDULE_KEYS})
+    # Persist what this install used, so the section stands on its own: the
+    # schedule values and the backend always; probe and the model overrides
+    # only when given (drop a persisted one by editing the file).
     settings.update_command(parser, command, {
         "backend": backend, "probe": args.probe, **{key: values[key] for key in settings.SCHEDULE_KEYS},
         "model": args.model, "effort": args.effort, "thread_source": args.thread_source,

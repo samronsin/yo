@@ -189,38 +189,38 @@ See `./install.py --help` for `--window-hours`, `--num-windows`, `--probe`/
 
 ### Settings
 
-`install.py` persists flags in `~/.yo/settings.ini`; omitted flags fall back to
-the file, then built-in defaults. The first install seeds `[DEFAULT]`, and
-command sections store only overrides:
+`install.py` persists flags in `~/.yo/settings.ini`, one section per command;
+omitted flags fall back to the section, then to the built-in defaults. Each
+section stands on its own, nothing is shared between commands:
 
 ```ini
-[DEFAULT]
+[codex-pro]
+backend = codex
 tz = Europe/Paris
 hours = 9-18
 window_hours = 5
 num_windows = 3
 
-[codex-pro]
-backend = codex
-
 [claude-perso]
 backend = claude
+tz = Europe/Paris
 hours = 19-23
+window_hours = 5
+num_windows = 3
 ```
 
-- Per command: `backend`; `probe` (`--probe`/`--no-probe`; the codex default
-  is on); optional `model`, `effort`, `thread_source` overrides, which `yo`
-  applies to that command's pings (a record then says `source: settings`).
-- Host-wide, overridable per command: `tz`, `hours`, `window_hours`,
-  `num_windows`.
+Keys: `backend`; `tz`, `hours`, `window_hours`, `num_windows`; `probe`
+(`--probe`/`--no-probe`; the codex default is on); optional `model`, `effort`,
+`thread_source` overrides, which `yo` applies to that command's pings (a record
+then says `source: settings`).
 
 `yo` reads these settings; its flags override them for one run. Registered
 commands need no `--backend`, and `--status` uses their `tz`. To register a
-command without cron (a laptop that must never get a crontab), add its section
-and `backend` directly to the INI file, creating `~/.yo/settings.ini` if needed.
-After editing schedule settings, run `./install.py --command NAME` to apply them.
-`DEFAULT` is reserved; rewrites discard comments. Credentials and profiles
-belong in the wrapper script, not this file.
+command without cron (a laptop that must never get a crontab), add a section
+with its `backend` (and a `tz` for display) directly to the INI file, creating
+`~/.yo/settings.ini` if needed. After editing schedule settings, run
+`./install.py --command NAME` to apply them. Rewrites discard comments.
+Credentials and profiles belong in the wrapper script, not this file.
 
 ### Custom commands
 

@@ -144,11 +144,9 @@ class DispatchTests(ScratchCase):
             self.assertEqual(exc.exception.code, 2)
             self.assertIn("backend 'cdoex' for command 'wrapper' is not one of codex, claude", err.getvalue())
             self.assertEqual((codex.call_count, claude.call_count), (2, 1))
-            # [DEFAULT] tz applies to unregistered commands too.
-            parser[settings.DEFAULT_SECTION]["tz"] = "UTC"
-            settings.save(parser)
+            # An unregistered command has no tz: --status renders in the machine's.
             yo.main(["codex"])
-            self.assertEqual(codex.call_args.args[0].tz, "UTC")
+            self.assertIsNone(codex.call_args.args[0].tz)
 
     def test_executable_on_path_works_outside_the_repo(self):
         repo = self.root / "repo"

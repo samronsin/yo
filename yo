@@ -33,7 +33,7 @@ def main(argv=None):
 
     config = settings.load()
     registered = config.has_section(args.command)
-    section = config[args.command] if registered else config[settings.DEFAULT_SECTION]
+    section = config[args.command] if registered else {}
     if args.backend is None and registered:
         args.backend = section.get("backend")
     try:
@@ -47,7 +47,7 @@ def main(argv=None):
     for name in from_file:
         setattr(args, name, section[name])
     args.override_source = "manual" if manual else "settings" if from_file else None
-    args.tz = section.get("tz")  # --status renders in the command's (or the host's) timezone
+    args.tz = section.get("tz")  # --status renders in the command's timezone when it has one
     if args.probe and args.backend != "codex":
         parser.error("--probe is only supported with the codex backend (Claude's /usage read is minute-precise, too coarse to verify anchoring; see --status)")
     runner = codex_runner if args.backend == "codex" else claude_runner
