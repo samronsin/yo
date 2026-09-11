@@ -570,7 +570,7 @@ class SettingsFlowTest(ScratchCase):
         self.assertEqual(written, "")
         self.assertFalse(settings.load().has_section("codex-pro"))
         # Registered but no block: only the section goes, and the crontab is left alone.
-        self.run_main(["--command", "codex-pro", "--backend", "codex"])
+        self.run_main(["--tz", "UTC", "--hours", "9-18", "--command", "codex-pro", "--backend", "codex"])
         _, written = self.run_main(["--remove", "codex-pro"])
         self.assertIsNone(written)
         self.assertFalse(settings.load().has_section("codex-pro"))
