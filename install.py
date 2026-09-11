@@ -503,6 +503,9 @@ def settings_line(parser, command, entries):
         values = effective_settings(parser, command)
     except SystemExit as exc:  # a value that does not convert; the message names it
         return f"  settings: invalid; {str(exc.code).removeprefix(f'error: {command}: ')}"
+    if not values["hours"]:
+        return (f"  settings: registered without a schedule, so this block is stale; "
+                f"remove it (install.py --remove {command}) or add --tz/--hours")
     described = (f"tz={values['tz']} hours={values['hours']} "
                  f"windows={values['num_windows']}x{values['window_hours']}h backend={values['backend']}"
                  + ("" if values["probe"] is None else f" probe={'on' if values['probe'] else 'off'}"))
@@ -536,8 +539,10 @@ def format_status(jobs, parser=None):
                 f"  last:     {log_dir / f'yo-{command}.last.txt'}"]
     absent = [command for command in registered if command not in installed]
     if absent:
-        out += ["", f"Registered in {settings.settings_path()} without a cron block:",
-                *(f"  {command} (to schedule: install.py --command {command})" for command in absent)]
+        out += ["", f"Registered in {settings.settings_path()} without a cron block:"]
+        for command in absent:
+            flags = "" if parser[command].get("hours") else " --tz ... --hours ..."
+            out.append(f"  {command} (to schedule: install.py --command {command}{flags})")
     return "\n".join(out) + "\n"
 
 
@@ -567,6 +572,8 @@ def install_schedule(args):
     original = settings.dump(parser)
     command = args.command
     values = effective_settings(parser, command, args)
+    if not values["hours"]:
+        return register_only(args, parser, original, command, values)
     backend, cron_content, summary = plan_block(command, values, cron_path_for([command, "python3"]))
     # Preflight: a malformed crontab should fail before the user approves anything.
     remove_managed_block(crontab, command)
@@ -592,6 +599,32 @@ def install_schedule(args):
     write_crontab(kept + cron_content.splitlines())
     settings.save(parser)
     print("Crontab and settings updated.")
+
+
+def register_only(args, parser, original, command, values):
+    """No hours given and none in settings: record the command for yo and --status.
+
+    Nothing is planned, so the crontab is left alone (a laptop that must never
+    get a crontab registers its logins this way). Adding --hours later, with a
+    --tz, schedules it like any other install.
+    """
+    try:
+        backend = resolve_backend(command, values["backend"])
+    except argparse.ArgumentTypeError as exc:
+        sys.exit(f"error: {exc}")
+    if values["tz"]:
+        check_tz(values["tz"])
+    cron_path_for([command])  # yo must be able to run it
+    settings.update_command(parser, command, {
+        "backend": backend, "tz": values["tz"], "window_hours": args.window_hours, "num_windows": args.num_windows,
+        "probe": args.probe, "model": args.model, "effort": args.effort, "thread_source": args.thread_source,
+    })
+    print(f"No hours given and none in settings for {command}: registering it without a cron block.\n"
+          f"`yo {command}` and `yo {command} --status` then need no --backend; add --tz and --hours to schedule it.")
+    print(f"\nSettings ({settings.settings_path()}) after this:\n\n{settings.dump(parser)}", end="")
+    confirm_settings(args, "\nWrite this? [y/N] ", original)
+    settings.save(parser)
+    print("Settings updated; crontab untouched.")
 
 
 def remove_schedule(args):

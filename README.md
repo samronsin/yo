@@ -215,11 +215,18 @@ Keys: `backend`; `tz`, `hours`, `window_hours`, `num_windows`; `probe`
 then says `source: settings`).
 
 `yo` reads these settings; its flags override them for one run. Registered
-commands need no `--backend`, and `--status` uses their `tz`. To register a
-command without cron (a laptop that must never get a crontab), add a section
-with its `backend` (and a `tz` for display) directly to the INI file, creating
-`~/.yo/settings.ini` if needed. After editing schedule settings, run
-`./install.py --command NAME` to apply them. Rewrites discard comments.
+commands need no `--backend`, and `--status` uses their `tz`. Without
+`--hours` (and none in the file), `install.py` registers the command and leaves
+the crontab alone, which is how a laptop that must never get a crontab
+registers its logins:
+
+```sh
+./install.py --command claude-perso --backend claude --tz Europe/Paris
+./yo claude-perso --status                # no --backend needed
+```
+
+Add `--hours` later to schedule it. After editing schedule settings by hand,
+run `./install.py --command NAME` to apply them. Rewrites discard comments.
 Credentials and profiles belong in the wrapper script, not this file.
 
 ### Custom commands

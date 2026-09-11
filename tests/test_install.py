@@ -517,12 +517,29 @@ class SettingsFlowTest(ScratchCase):
         self.assertFalse(section.getboolean("probe"))
         self.assertEqual(section["model"], "gpt-5.6-luna")
 
-    def test_missing_schedule_without_settings_is_an_error(self):
+    def test_no_hours_registers_the_command_and_leaves_the_crontab_alone(self):
+        out, written = self.run_main(["--command", "claude-perso", "--backend", "claude", "--tz", "Europe/Paris"])
+        self.assertIsNone(written)
+        self.assertEqual(dict(settings.load()["claude-perso"]), {"backend": "claude", "tz": "Europe/Paris"})
+        self.assertIn("registering it without a cron block", out)
+        self.assertIn("Settings updated; crontab untouched.", out)
+        parser = settings.load()
+        self.assertIn(f"Registered in {settings.settings_path()} without a cron block:\n"
+                      "  claude-perso (to schedule: install.py --command claude-perso --tz ... --hours ...)\n",
+                      format_status([], parser))
+        stale = render_cron([6], "UTC", "claude-perso", "claude", "/bin")
+        self.assertIn("  settings: registered without a schedule, so this block is stale; remove it",
+                      format_status(installed_jobs(stale), parser))
+        # Hours later, tz from the file: scheduled like any install; a bare re-run then keeps it scheduled.
+        _, written = self.run_main(["--command", "claude-perso", "--hours", "19-23"])
+        self.assertIn("# >>> yo-claude-perso >>>", written)
+        _, again = self.run_main(["--command", "claude-perso"])
+        self.assertEqual(again, written)
+        # Hours without a tz anywhere is still an error, and nothing is written.
         with self.assertRaises(SystemExit) as cm:
-            self.run_main(["--command", "codex"])
-        self.assertEqual(cm.exception.code,
-                         f"error: codex: --tz, --hours not given and not in {settings.settings_path()}")
-        self.assertFalse(settings.settings_path().exists())
+            self.run_main(["--command", "codex", "--hours", "9-18"])
+        self.assertEqual(cm.exception.code, f"error: codex: --tz not given and not in {settings.settings_path()}")
+        self.assertFalse(settings.load().has_section("codex"))
 
     def test_bad_values_in_the_file_are_reported(self):
         # A typo in the file is an error, never a silent default (a misspelt probe would
@@ -584,7 +601,7 @@ class SettingsFlowTest(ScratchCase):
             settings.save(parser)
             return "y"
 
-        for argv in (["--command", "codex"], ["--remove", "codex"]):
+        for argv in (["--command", "codex"], ["--remove", "codex"], ["--command", "status-only", "--backend", "claude"]):
             with self.subTest(argv=argv):
                 parser = settings.load()
                 parser.remove_section("other")
