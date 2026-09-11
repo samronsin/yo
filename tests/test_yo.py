@@ -85,6 +85,18 @@ class DispatchTests(ScratchCase):
                 self.assertEqual((self.log_dir / "yo-wrapper.last.txt").read_text(), "391\n")
                 self.assertEqual(codex_runner.load_records("wrapper", self.log_dir), [])
 
+    def test_a_terminal_is_told_where_the_log_went(self):
+        # invoke() already checks that a non-terminal run (cron) prints nothing.
+        for argv, expected_lines in ((["wrapper", "--backend", "codex"], 1), (["wrapper", "--backend", "codex", "--status"], 0)):
+            with self.subTest(argv=argv), mock.patch.dict(os.environ, self.env), \
+                    redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err, \
+                    mock.patch.object(err, "isatty", return_value=True):
+                yo.main(argv)
+            lines = [line for line in err.getvalue().splitlines() if line.startswith("log: ")]
+            self.assertEqual(len(lines), expected_lines, err.getvalue())
+            if lines:
+                self.assertEqual(lines[0], f"log: {codex_runner.run_logs('wrapper', self.log_dir)[-1]}")
+
     def test_claude_run_log_is_terminated_even_when_the_last_message_file_fails(self):
         last = self.log_dir / "yo-wrapper.last.txt"
         self.log_dir.mkdir(parents=True)

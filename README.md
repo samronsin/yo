@@ -15,7 +15,7 @@ agent CLI you want already on `PATH`:
 git clone https://github.com/samronsin/yo.git
 cd yo
 
-./yo claude                 # smoke-test: one ping now, reply in ~/.yo/logs/
+./yo claude                 # smoke-test: one ping now; creates ~/.yo/ and logs the reply there
 
 # install a daily schedule anchored to your working hours
 ./install.py --tz Europe/Paris --hours 9-18 --command claude
@@ -330,7 +330,9 @@ to re-anchor its schedule; `--status` shows which blocks have drifted.
 ## Logs
 
 Written under `~/.yo/logs/` as `yo-<command>-<timestamp>.log`, with the final
-message in `yo-<command>.last.txt`. Logs from before this layout stay where they
+message in `yo-<command>.last.txt`. The first run creates the directory; at a
+terminal every ping prints `log: <path>` on stderr, while under cron it stays
+silent. Logs from before this layout stay where they
 were, under the checkout's `logs/`. Probed Codex runs end with a `record:` line holding
 the ping's verified outcome (see [Recorded Codex pings](#recorded-codex-pings)).
 

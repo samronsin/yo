@@ -52,10 +52,17 @@ def main(argv=None):
         parser.error("--probe is only supported with the codex backend (Claude's /usage read is minute-precise, too coarse to verify anchoring; see --status)")
     runner = codex_runner if args.backend == "codex" else claude_runner
     try:
-        return status.main(args) if args.status else runner.run(args)
+        rc = status.main(args) if args.status else runner.run(args)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
         print(f"{args.command}: {exc}", file=sys.stderr)
         return 2
+    # A ping is silent for cron's sake; at a terminal, say where its log went
+    # (which is also how the first run announces that it created ~/.yo/).
+    if not args.status and sys.stderr.isatty():
+        logs = codex_runner.run_logs(args.command)
+        if logs:
+            print(f"log: {logs[-1]}", file=sys.stderr)
+    return rc
 
 
 if __name__ == "__main__":
