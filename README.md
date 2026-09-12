@@ -88,9 +88,9 @@ codex (codex), read 2026-09-10 13:44 CEST
 
 - **Codex** uses the probe's token-free quota read, once. Usage above 0%, a
   past reset, or a reset clearly nearer than 5h each settle `open`/`idle` from
-  one read; a 0% window whose reset sits at about now+5h is reported as idle
-  or opened in the last two minutes, since only the probe's 15s drift test
-  could tell, and a status read does not wait for it.
+  one read; a 0% window whose reset sits within ~90s of now+5h is reported as
+  idle or just opened, since only the probe's 15s drift test could tell, and a
+  status read does not wait for it.
 - **Claude** uses headless `/usage` (zero model turns on Claude Code 2.1.265;
   a warning appears if a version spends turns). Positive usage means `open`;
   zero is ambiguous. Unrecognized reset dates are shown as printed by the CLI.

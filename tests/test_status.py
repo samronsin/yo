@@ -219,7 +219,8 @@ class FormatTests(unittest.TestCase):
         self.assertIn("open or idle? cannot tell, ?% used, reports reset ", unknown)
         fresh = self.render("codex", {"five_hour": {"state": "idle_or_fresh", "used_percent": 0, "resets_at": self.NOW + 18000,
                                                     "anchored_at": None, "reads": []}, "weekly": []})
-        self.assertIn("5h window   idle, or a window opened in the last 2 minutes, 0% used, reports reset ", fresh)
+        self.assertIn(f"5h window   idle, or a window opened in the last {anchor.OPEN_WINDOW_MARGIN_SECS}s, "
+                      "0% used, reports reset ", fresh)
         self.assertIn("other window ?% used, resets ?", unknown)
         self.assertIn("5h window   not reported", self.render("codex", {"five_hour": None, "weekly": []}))
 

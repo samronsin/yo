@@ -157,8 +157,8 @@ def quota(command):
 
     A status read does not wait for the probe's 15s drift test: quick_state()
     settles every case but a 0% read with the reset at about now+5h, which is
-    reported as "idle_or_fresh" (an idle account, or a window opened in the
-    last minute or two).
+    reported as "idle_or_fresh" (an idle account, or a window opened within
+    OPEN_WINDOW_MARGIN_SECS).
     """
     payload = read_limits_payload(command=command)
     out = {"five_hour": None, "weekly": []}
