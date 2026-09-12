@@ -269,6 +269,38 @@ class DispatchTests(FakeCliCase):
         self.assertRegex(text.splitlines()[0], r"^wrapper \(claude\), read \d{4}-\d{2}-\d{2} \d{2}:\d{2} JST$")
         self.assertIn(" JST (", text)  # the 5h reset too
 
+    def test_no_command_reports_every_registered_command(self):
+        (self.root / "wrapper2").symlink_to(self.root / "wrapper")  # a second login on PATH
+        parser = settings.load()
+        settings.update_command(parser, "wrapper", {"backend": "codex", "tz": "UTC"})
+        settings.update_command(parser, "wrapper2", {"backend": "claude", "tz": "Asia/Tokyo"})
+        settings.save(parser)
+        rc, text = self.invoke("--status")
+        self.assertEqual(rc, 0)
+        reports = text.split("\n\n")
+        self.assertEqual(len(reports), 2)
+        self.assertRegex(reports[0], r"^wrapper \(codex\), read .* UTC\n  5h window   open, 12% used")
+        self.assertRegex(reports[1], r"^wrapper2 \(claude\), read .* JST\n  5h window      open, 18% used")
+        # A section that cannot be resolved is reported on stderr and the others still print; rc is 1.
+        settings.update_command(parser, "wrapper2", {"backend": "cdoex"})
+        settings.save(parser)
+        with self.with_env(FAKE_CODEX_QUOTA={"primary": five_hour(12, 7200)}), \
+                redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(yo.main(["--status"]), 1)
+        self.assertIn("wrapper (codex), read", out.getvalue())
+        self.assertNotIn("wrapper2 (", out.getvalue())
+        self.assertIn("wrapper2: backend 'cdoex' for command 'wrapper2' is not one of codex, claude", err.getvalue())
+
+    def test_no_command_without_registrations_or_status_is_a_usage_error(self):
+        cases = ((["--status"], "none registered in"), ([], "required: command"),
+                 (["--status", "--backend", "codex"], "--backend needs a command"),
+                 (["--backend", "codex"], "required: command"))
+        for argv, message in cases:
+            with self.subTest(argv=argv), redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit) as exc:
+                yo.main(argv)
+            self.assertEqual(exc.exception.code, 2)
+            self.assertIn(message, err.getvalue())
+
     def test_failed_read_prints_the_error_and_exits_1(self):
         with self.with_env(), redirect_stdout(io.StringIO()) as stdout:
             self.assertEqual(yo.main(["wrapper", "--backend", "codex", "--status"]), 1)

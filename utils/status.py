@@ -156,8 +156,8 @@ def quota_rows(quota, now, zone=None):
     return rows
 
 
-def main(args):
+def main(command, backend, tz=None):
     """Entry point for `yo <command> --status`: print the report, exit 1 if the quota could not be read."""
-    out = report(args.command, args.backend, getattr(args, "tz", None))
+    out = report(command, backend, tz)
     print(format_report(out), end="")
     return 1 if "error" in out else 0

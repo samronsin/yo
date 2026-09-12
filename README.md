@@ -76,6 +76,7 @@ command's `tz` from settings, else the machine's:
 ./yo codex --status                         # Codex login, via `codex app-server`
 ./yo claude-pro --status                    # a registered Claude wrapper, via headless `/usage`
 ./yo claude-perso --backend claude --status # an unregistered one needs --backend
+./yo --status                               # every registered command, one report each
 ```
 
 ```
