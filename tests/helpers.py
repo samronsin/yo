@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from utils import settings
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FAKE_CODEX = Path(__file__).resolve().parent / "fixtures" / "fake_codex.py"
 
@@ -18,6 +20,12 @@ class ScratchCase(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
+        # HOME is the scratch root, so ~/.yo/ (settings, logs, locks) and the ~/.codex* globs
+        # resolve under it, in this process and in the CLIs and yo it spawns.
+        env = mock.patch.dict(os.environ, {"HOME": str(self.root)})
+        self.addCleanup(env.stop)
+        env.start()
+        self.log_dir = settings.log_dir()
 
     def patch(self, target, attribute, *args, **kwargs):
         patcher = mock.patch.object(target, attribute, *args, **kwargs)

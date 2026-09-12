@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from unittest import mock
 
 from tests.helpers import REPO_ROOT, ScratchCase
-from utils import claude_runner, codex_anchor_probe as anchor, codex_runner, status
+from utils import claude_runner, codex_anchor_probe as anchor, codex_runner, settings, status
 
 SPEC = spec_from_loader("yo_cli_status", SourceFileLoader("yo_cli_status", str(REPO_ROOT / "yo")))
 yo = module_from_spec(SPEC)
@@ -30,7 +30,6 @@ class FakeCliCase(ScratchCase):
         super().setUp()
         self.install_fake_cli()
         self.patch(codex_runner, "ROOT_DIR", self.root)
-        self.log_dir = self.root / "logs"
         self.sleep = self.patch(anchor.time, "sleep")
 
     def with_env(self, **extra):
@@ -260,6 +259,15 @@ class DispatchTests(FakeCliCase):
         self.assertIn("weekly      31% used", text)
         self.assertFalse(self.argv.exists())  # nothing was sent
         self.assertEqual(codex_runner.run_logs("wrapper", self.log_dir), [])  # and no run log written
+
+    def test_registered_command_renders_in_its_timezone(self):
+        parser = settings.load()
+        settings.update_command(parser, "wrapper", {"backend": "claude", "tz": "Asia/Tokyo"})
+        settings.save(parser)
+        rc, text = self.invoke("wrapper", "--status")  # no --backend needed
+        self.assertEqual(rc, 0)
+        self.assertRegex(text.splitlines()[0], r"^wrapper \(claude\), read \d{4}-\d{2}-\d{2} \d{2}:\d{2} JST$")
+        self.assertIn(" JST (", text)  # the 5h reset too
 
     def test_failed_read_prints_the_error_and_exits_1(self):
         with self.with_env(), redirect_stdout(io.StringIO()) as stdout:

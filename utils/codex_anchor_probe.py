@@ -231,9 +231,10 @@ def probe(send, command, pre_wait=PRE_WAIT_SECS, settle=SETTLE_SECS,
 
 def main() -> int:
     if __package__:
-        from . import codex_runner
+        from . import codex_runner, settings
     else:
         import codex_runner
+        import settings
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     parser.add_argument("--command", default="codex", help="Codex executable or wrapper")
     parser.add_argument("--model", default=None)
@@ -245,8 +246,8 @@ def main() -> int:
     if args.wait < 2 * DRIFT_TOLERANCE_SECS:
         parser.error(f"--wait must be at least {2 * DRIFT_TOLERANCE_SECS} seconds to distinguish drift")
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    log_dir = ROOT_DIR / "logs"
-    log_dir.mkdir(exist_ok=True)
+    log_dir = settings.log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
     config = {name: getattr(args, name) or codex_runner.DEFAULTS[name] for name in codex_runner.DEFAULTS}
     log_file = log_dir / f"gap-anchor-test-{stamp}.log"
     result = probe(lambda: codex_runner.send_ping(args.command, config, log_file,

@@ -8,8 +8,14 @@ evenly before and after. The run times are converted from the requested
 timezone into the system-local time cron schedules against (cron has no
 portable per-crontab timezone -- see to_system_times), a cron entry is
 installed at each, then the resulting crontab is printed.
+
+What was asked for is persisted in ~/.yo/settings.ini (see utils/settings.py):
+flags given win over the file and are written back, flags omitted fall back to
+the file, then to the built-in defaults. --status compares settings with the
+crontab, and --remove drops both the command's block and its settings.
 """
 import argparse
+import configparser
 import re
 import shutil
 import subprocess
@@ -17,6 +23,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from utils import settings
 
 ROOT_DIR = Path(__file__).parent.resolve()
 JOB_CMD = str(ROOT_DIR / "yo")
@@ -94,8 +102,10 @@ def resolve_backend(command, backend):
         The resolved backend name.
 
     Raises:
-        argparse.ArgumentTypeError: when it can't be decided; callers turn it
-            into their own usage error (yo's parser, install.py's exit).
+        argparse.ArgumentTypeError: when it can't be decided, or `backend` is
+            not a known backend (argparse's choices catch a bad flag, but a
+            value read from the settings file arrives here unchecked); callers
+            turn it into their own usage error (yo's parser, install.py's exit).
     """
     if command in BACKENDS:
         if backend is not None and backend != command:
@@ -103,22 +113,25 @@ def resolve_backend(command, backend):
         return command
     if backend is None:
         raise argparse.ArgumentTypeError(f"'{command}' is a custom command; pass --backend codex|claude")
+    if backend not in BACKENDS:
+        raise argparse.ArgumentTypeError(f"backend '{backend}' for command '{command}' is not one of {', '.join(BACKENDS)}")
     return backend
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Install yo cron jobs")
+    parser = argparse.ArgumentParser(description="Install yo cron jobs; what you pass is kept in "
+                                                 f"{settings.settings_path()} for later runs")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--status", action="store_true",
-                      help="Show the installed yo cron jobs and exit")
+                      help="Show the installed yo cron jobs against the settings file and exit")
     mode.add_argument("--remove", type=command_name, metavar="NAME",
-                      help="Remove NAME's cron block (see --status) and exit; "
+                      help="Remove NAME's cron block and settings section (see --status) and exit; "
                            "other blocks and your own crontab lines are kept")
-    parser.add_argument("--tz", help="Timezone, e.g. Europe/Paris (required to install)")
-    parser.add_argument("--hours", help="Working hours as START-END (24h), e.g. 9-18 (required to install)")
-    parser.add_argument("--window-hours", type=positive_int, default=DEFAULT_WINDOW_HOURS,
+    parser.add_argument("--tz", help="Timezone, e.g. Europe/Paris (required to install unless in settings)")
+    parser.add_argument("--hours", help="Working hours as START-END (24h), e.g. 9-18 (required to install unless in settings)")
+    parser.add_argument("--window-hours", type=positive_int, default=None,
                         metavar=str(DEFAULT_WINDOW_HOURS), help="Hours each run covers")
-    parser.add_argument("--num-windows", type=positive_int, default=DEFAULT_NUM_WINDOWS,
+    parser.add_argument("--num-windows", type=positive_int, default=None,
                         metavar=str(DEFAULT_NUM_WINDOWS), help="Number of runs per day")
     parser.add_argument("--command", type=command_name, metavar="NAME",
                         help="Command to run (required to install): a backend "
@@ -126,28 +139,32 @@ def parse_args(argv=None):
                              "script/binary on PATH whose runner is given by "
                              "--backend (e.g. codex-pro). Shell aliases are not "
                              "supported by cron. Run once per command; each gets "
-                             "its own crontab block.")
+                             "its own crontab block and settings section.")
     parser.add_argument("--backend", choices=BACKENDS,
                         help="Runner backend for a custom --command; a backend "
                              "name (codex/claude) is its own backend")
-    parser.add_argument("--no-probe", action="store_true",
-                        help="Schedule plain Codex pings instead of verified, recorded ones (see yo --probe)")
+    parser.add_argument("--probe", action=argparse.BooleanOptionalAction, default=None,
+                        help="Verify and record each Codex ping (the default for the codex "
+                             "backend; --no-probe schedules plain pings)")
+    for name in ("model", "effort", "thread-source"):
+        parser.add_argument(f"--{name}", help=f"Persist a {name} override for this command "
+                                              "(yo's default otherwise; edit the file to drop it)")
     parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     args = parser.parse_args(argv)
-    # --status and --remove act on the installed crontab without computing a
-    # schedule, so the schedule flags are required (and only meaningful) to
-    # install. Three flag-selected modes is the ceiling before subcommands.
-    required = (("--tz", args.tz), ("--hours", args.hours), ("--command", args.command))
+    # --status and --remove act on the crontab and the settings file
+    # as they are, so the schedule flags belong to an install only. --command is
+    # the one flag an install always needs; the rest may come from the file.
+    install_flags = (("--tz", args.tz), ("--hours", args.hours), ("--window-hours", args.window_hours),
+                     ("--num-windows", args.num_windows), ("--command", args.command),
+                     ("--backend", args.backend),
+                     ("--probe/--no-probe", args.probe), ("--model", args.model),
+                     ("--effort", args.effort), ("--thread-source", args.thread_source))
     mode_flag = "--status" if args.status else "--remove" if args.remove else None
     if mode_flag is None:
-        missing = [flag for flag, value in required if value is None]
-        if missing:
-            parser.error(f"the following arguments are required: {', '.join(missing)}")
+        if args.command is None:
+            parser.error("the following arguments are required: --command")
     else:
-        if args.no_probe:
-            parser.error(f"{mode_flag} cannot be combined with --no-probe")
-        given = [flag for flag, value in (*required, ("--backend", args.backend))
-                 if value is not None]
+        given = [flag for flag, value in install_flags if value is not None]
         if given:
             parser.error(f"{mode_flag} cannot be combined with {', '.join(given)}")
     return args
@@ -278,7 +295,7 @@ def render_cron(system_times, tz, command, backend, cron_path, probe=None):
     local_tz = datetime.now().astimezone().tzname()
     lines = [
         begin,
-        f"# {tz} schedule converted to system time ({local_tz}); re-run install.py after a clock change",
+        f"# {tz} schedule converted to system time ({local_tz}); re-run install.py --command {command} after a clock change",
         f"PATH={cron_path}",
         "",
     ]
@@ -391,30 +408,148 @@ def installed_jobs(crontab):
     ]
 
 
-def format_status(jobs):
-    """Render installed_jobs() for a human."""
-    if not jobs:
+def effective_settings(parser, command, args=None):
+    """Merge flags over the command's section over built-in defaults; convert integers and booleans."""
+    section = parser[command] if parser.has_section(command) else {}
+    flags = vars(args) if args is not None else {}
+
+    def pick(key):
+        return flags[key] if flags.get(key) is not None else section.get(key)
+
+    values = {key: pick(key) for key in settings.SCHEDULE_KEYS + settings.COMMAND_KEYS}
+    for key, default in (("window_hours", DEFAULT_WINDOW_HOURS), ("num_windows", DEFAULT_NUM_WINDOWS)):
+        raw = values[key] if values[key] is not None else default
+        try:
+            values[key] = positive_int(raw)
+        except (argparse.ArgumentTypeError, ValueError):
+            sys.exit(f"error: {command}: {key} = {raw!r} in {settings.settings_path()} must be a positive integer")
+    if values["probe"] is not None and not isinstance(values["probe"], bool):  # from the file, as text
+        try:
+            values["probe"] = section.getboolean("probe")
+        except ValueError:
+            sys.exit(f"error: {command}: probe = {values['probe']!r} in {settings.settings_path()} must be true or false")
+    return values
+
+
+def parse_hours(text, warn=True):
+    """--hours START-END as (start, end) fractional hours, end > start (a wrapped night shift adds 24)."""
+    try:
+        start, end = (int(x) for x in text.split("-"))
+    except (ValueError, AttributeError):
+        sys.exit("error: --hours must be START-END, e.g. 9-18")
+    if end <= start:
+        if warn:
+            print(
+                f"warning: end ({end}) <= start ({start}); assuming working hours wrap "
+                f"past midnight (e.g. night shift), treating end as {end}:00 next day",
+                file=sys.stderr,
+            )
+        end += 24  # working hours wrap past midnight (e.g. night shift 22-6)
+    return start, end
+
+
+def check_tz(tz):
+    try:
+        ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError):
+        sys.exit(f"error: unknown timezone '{tz}'; use an IANA name like Europe/Paris")
+
+
+def plan_block(command, values, cron_path, warn=True):
+    """Validate settings and return (backend, cron block, summary)."""
+    missing = [f"--{key}" for key in ("tz", "hours") if not values[key]]
+    if missing:
+        sys.exit(f"error: {command}: {', '.join(missing)} not given and not in {settings.settings_path()}")
+    check_tz(values["tz"])
+    start, end = parse_hours(values["hours"], warn)
+    try:
+        backend = resolve_backend(command, values["backend"])
+    except argparse.ArgumentTypeError as exc:
+        sys.exit(f"error: {exc}")
+    probe = values["probe"] if values["probe"] is not None else backend == "codex"
+    # The windowed schedule should cover the working day; warn if it can't.
+    coverage = values["num_windows"] * values["window_hours"]
+    if warn and coverage < end - start:
+        print(
+            f"warning: {values['num_windows']} run(s) x {values['window_hours']}h = {coverage}h "
+            f"cannot cover the {end - start}h working day; some hours will lack a "
+            f"fresh window",
+            file=sys.stderr,
+        )
+
+    run_times = compute_run_times(start, end, values["num_windows"], values["window_hours"])
+    system_times = to_system_times(run_times, values["tz"])
+    cron_content = render_cron(system_times, values["tz"], command, backend, cron_path,
+                               probe=probe and backend == "codex")
+    requested = ", ".join(f"{h:02d}:{m:02d}" for h, m in map(hour_minute, run_times))
+    scheduled = ", ".join(f"{h:02d}:{m:02d}" for h, m in map(hour_minute, system_times))
+    local_tz = datetime.now().astimezone().tzname()
+    summary = (f"Scheduled pings ({command}): {requested} {values['tz']} "
+               f"-> {scheduled} {local_tz} (cron schedules in system time)")
+    return backend, cron_content, summary
+
+
+def entry_tails(entries):
+    """A block's cron entries as {(schedule, arguments after the yo path)}, for comparing blocks
+    installed from another checkout (or before a clock change) with what settings would render."""
+    return {(schedule, " ".join(line.split()[1:])) for schedule, line in entries}
+
+
+def settings_line(parser, command, entries):
+    """The `settings:` row of --status for an installed block: in sync, out of date, or unregistered."""
+    if not parser.has_section(command):
+        return f"  settings: not registered; re-run install.py --command {command} ... to register it"
+    try:
+        values = effective_settings(parser, command)
+    except SystemExit as exc:  # a value that does not convert; the message names it
+        return f"  settings: invalid; {str(exc.code).removeprefix(f'error: {command}: ')}"
+    if not values["hours"]:
+        return (f"  settings: registered without a schedule, so this block is stale; "
+                f"remove it (install.py --remove {command}) or add --tz/--hours")
+    described = (f"tz={values['tz']} hours={values['hours']} "
+                 f"windows={values['num_windows']}x{values['window_hours']}h backend={values['backend']}"
+                 + ("" if values["probe"] is None else f" probe={'on' if values['probe'] else 'off'}"))
+    try:
+        _, cron_content, _ = plan_block(command, values, "PATH", warn=False)
+    except SystemExit:
+        return f"  settings: {described} (invalid; fix {settings.settings_path()})"
+    expected = entry_tails(entry for entry in map(parse_cron_entry, cron_content.splitlines()) if entry)
+    state = ("in sync" if expected == entry_tails(entries)
+             else f"differ from the crontab; run install.py --command {command}")
+    return f"  settings: {described} ({state})"
+
+
+def format_status(jobs, parser=None):
+    """Render installed_jobs() against the settings file for a human."""
+    parser = parser if parser is not None else configparser.ConfigParser(interpolation=None)
+    registered = parser.sections()
+    installed = {command for command, _ in jobs}
+    if not jobs and not registered:
         return "No yo cron jobs installed.\n"
-    out = ["Installed yo cron jobs:"]
+    out = ["Installed yo cron jobs:"] if jobs else ["No yo cron jobs installed."]
+    log_dir = settings.log_dir()
     for command, entries in jobs:
         schedule = ", ".join(describe_schedule(s) for s, _ in entries)
         command_lines = list(dict.fromkeys(line for _, line in entries))
-        # yo logs next to itself (see LOG_DIR in yo), so locate the logs from the
-        # installed yo's path rather than this checkout's.
-        yo_path = Path(command_lines[0].split()[0]) if command_lines else ROOT_DIR / "yo"
-        log_dir = yo_path.parent / "logs"
         out += ["", command,
                 f"  schedule: {schedule} system time" if schedule else "  schedule: (no cron entries)",
                 *(f"  command:  {line}" for line in command_lines),
+                settings_line(parser, command, entries),
                 f"  logs:     {log_dir / f'yo-{command}-<timestamp>.log'}",
                 f"  last:     {log_dir / f'yo-{command}.last.txt'}"]
+    absent = [command for command in registered if command not in installed]
+    if absent:
+        out += ["", f"Registered in {settings.settings_path()} without a cron block:"]
+        for command in absent:
+            flags = "" if parser[command].get("hours") else " --tz ... --hours ..."
+            out.append(f"  {command} (to schedule: install.py --command {command}{flags})")
     return "\n".join(out) + "\n"
 
 
 def main(args):
     try:
         if args.status:
-            print(format_status(installed_jobs(read_crontab())), end="")
+            print(format_status(installed_jobs(read_crontab()), settings.load()), end="")
         elif args.remove:
             remove_schedule(args)
         else:
@@ -423,91 +558,107 @@ def main(args):
         sys.exit(f"error: {exc}; fix it by hand (crontab -e) and retry")
 
 
+def confirm_settings(args, prompt, original):
+    """Approve the preview only if its source settings are still current."""
+    if not args.yes and not confirm(prompt):
+        sys.exit("Aborted; nothing changed.")
+    if settings.dump(settings.load()) != original:
+        sys.exit("Aborted; settings changed during confirmation. Retry with the current settings.")
+
+
 def install_schedule(args):
     crontab = read_crontab()  # fails fast when crontab isn't available
-
-    try:
-        ZoneInfo(args.tz)
-    except (ZoneInfoNotFoundError, ValueError):
-        sys.exit(f"error: unknown timezone '{args.tz}'; use an IANA name like Europe/Paris")
-
-    try:
-        start, end = (int(x) for x in args.hours.split("-"))
-    except ValueError:
-        sys.exit("error: --hours must be START-END, e.g. 9-18")
-    if end <= start:
-        print(
-            f"warning: end ({end}) <= start ({start}); assuming working hours wrap "
-            f"past midnight (e.g. night shift), treating end as {end}:00 next day",
-            file=sys.stderr,
-        )
-        end += 24  # working hours wrap past midnight (e.g. night shift 22-6)
-
+    parser = settings.load()
+    original = settings.dump(parser)
     command = args.command
-    try:
-        backend = resolve_backend(command, args.backend)
-    except argparse.ArgumentTypeError as exc:
-        sys.exit(f"error: {exc}")
-    # yo is a python3 script, so cron must find the interpreter as well as the
-    # command; both are resolved here and error out if missing.
-    cron_path = cron_path_for([command, "python3"])
+    values = effective_settings(parser, command, args)
+    if not values["hours"]:
+        return register_only(args, parser, original, command, values)
+    backend, cron_content, summary = plan_block(command, values, cron_path_for([command, "python3"]))
     # Preflight: a malformed crontab should fail before the user approves anything.
     remove_managed_block(crontab, command)
 
-    # The windowed schedule should cover the working day; warn if it can't.
-    coverage = args.num_windows * args.window_hours
-    if coverage < end - start:
-        print(
-            f"warning: {args.num_windows} run(s) x {args.window_hours}h = {coverage}h "
-            f"cannot cover the {end - start}h working day; some hours will lack a "
-            f"fresh window",
-            file=sys.stderr,
-        )
+    # Persist what this install used, so the section stands on its own: the
+    # schedule values and the backend always; probe and the model overrides
+    # only when given (drop a persisted one by editing the file).
+    settings.update_command(parser, command, {
+        "backend": backend, "probe": args.probe, **{key: values[key] for key in settings.SCHEDULE_KEYS},
+        "model": args.model, "effort": args.effort, "thread_source": args.thread_source,
+    })
 
-    run_times = compute_run_times(start, end, args.num_windows, args.window_hours)
-    system_times = to_system_times(run_times, args.tz)
-    cron_content = render_cron(system_times, args.tz, command, backend, cron_path,
-                               probe=backend == "codex" and not args.no_probe)
-
-    requested = ", ".join(f"{h:02d}:{m:02d}" for h, m in map(hour_minute, run_times))
-    scheduled = ", ".join(f"{h:02d}:{m:02d}" for h, m in map(hour_minute, system_times))
-    local_tz = datetime.now().astimezone().tzname()
-    print(f"Scheduled pings ({command}): {requested} {args.tz} "
-          f"-> {scheduled} {local_tz} (cron schedules in system time)")
-
+    print(summary)
     print(f"\nGenerated cron snippet:\n\n{cron_content}")
+    print(f"Settings ({settings.settings_path()}) after install:\n\n{settings.dump(parser)}", end="")
 
-    if not args.yes and not confirm("\nInstall this into your crontab? [y/N] "):
-        sys.exit("Aborted; nothing changed.")
+    confirm_settings(args, "\nInstall this into your crontab and settings? [y/N] ", original)
 
     # Drop only this command's block, so re-running replaces it while leaving
     # other commands' blocks (and the user's own lines) untouched. Re-read now:
     # the crontab may have changed while the user was reviewing the prompt.
     kept = remove_managed_block(read_crontab(), command)
     write_crontab(kept + cron_content.splitlines())
-    print("Crontab updated.")
+    settings.save(parser)
+    print("Crontab and settings updated.")
+
+
+def register_only(args, parser, original, command, values):
+    """No hours given and none in settings: record the command for yo and --status.
+
+    Nothing is planned, so the crontab is left alone (a laptop that must never
+    get a crontab registers its logins this way). Adding --hours later, with a
+    --tz, schedules it like any other install.
+    """
+    try:
+        backend = resolve_backend(command, values["backend"])
+    except argparse.ArgumentTypeError as exc:
+        sys.exit(f"error: {exc}")
+    if values["tz"]:
+        check_tz(values["tz"])
+    cron_path_for([command])  # yo must be able to run it
+    settings.update_command(parser, command, {
+        "backend": backend, "tz": values["tz"], "window_hours": args.window_hours, "num_windows": args.num_windows,
+        "probe": args.probe, "model": args.model, "effort": args.effort, "thread_source": args.thread_source,
+    })
+    print(f"No hours given and none in settings for {command}: registering it without a cron block.\n"
+          f"`yo {command}` and `yo {command} --status` then need no --backend; add --tz and --hours to schedule it.")
+    print(f"\nSettings ({settings.settings_path()}) after this:\n\n{settings.dump(parser)}", end="")
+    confirm_settings(args, "\nWrite this? [y/N] ", original)
+    settings.save(parser)
+    print("Settings updated; crontab untouched.")
 
 
 def remove_schedule(args):
-    """Drop `args.remove`'s managed block from the crontab, leaving the rest as is."""
+    """Drop `args.remove`'s managed block and settings section, leaving the rest as is."""
     command = args.remove
+    parser = settings.load()
+    original = settings.dump(parser)
+    registered = parser.has_section(command)
     # Splitting also refuses a malformed crontab before anything is shown or asked.
     segments = split_managed_blocks(read_crontab())
     block = [line for owner, lines in segments if owner == command for line in lines]
-    if not block:
+    if not block and not registered:
         installed = [owner for owner, _ in segments if owner is not None]
         hint = (f"installed: {', '.join(installed)} (see --status)" if installed
                 else "no yo cron jobs installed")
         sys.exit(f"error: no yo-{command} block in the crontab; {hint}")
 
-    print(f"Cron block to remove ({command}):\n\n" + "\n".join(block) + "\n")
+    if block:
+        print(f"Cron block to remove ({command}):\n\n" + "\n".join(block) + "\n")
+    else:
+        print(f"No yo-{command} block in the crontab.")
+    if registered:
+        print(f"Settings section [{command}] in {settings.settings_path()} will be removed too.")
 
-    if not args.yes and not confirm("\nRemove this from your crontab? [y/N] "):
-        sys.exit("Aborted; nothing changed.")
+    confirm_settings(args, "\nRemove this from your crontab? [y/N] ", original)
 
-    # Re-read: the crontab may have changed while the user was reviewing the prompt.
-    write_crontab(remove_managed_block(read_crontab(), command))
-    print(f"Crontab updated; yo-{command} block removed.")
+    if block:
+        # Re-read: the crontab may have changed while the user was reviewing the prompt.
+        write_crontab(remove_managed_block(read_crontab(), command))
+        print(f"Crontab updated; yo-{command} block removed.")
+    if registered:
+        parser.remove_section(command)
+        settings.save(parser)
+        print(f"Settings updated; [{command}] section removed.")
 
 
 if __name__ == "__main__":

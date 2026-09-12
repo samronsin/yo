@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
-"""Ping Codex or Claude, probe Codex's window, or read quota and last-run status."""
+"""Send a ping through Codex or Claude, optionally probing Codex's quota window.
+
+With --status, report the account's quota windows and the last run instead.
+A command registered by install.py needs no --backend: it, the persisted
+model/effort/thread-source overrides and the display timezone come from
+~/.yo/settings.ini; flags given here win for this run.
+"""
 import argparse
 import subprocess
 import sys
 
 from install import BACKENDS, command_name, resolve_backend
-from utils import claude_runner, codex_runner, status
+from utils import claude_runner, codex_runner, settings, status
+
+OVERRIDES = ("model", "effort", "thread_source")
 
 
 def main(argv=None):
@@ -18,23 +26,43 @@ def main(argv=None):
     parser.add_argument("--status", action="store_true",
                         help="report the account's quota windows and the last run instead of pinging")
     args = parser.parse_args(argv)
+    if args.status:
+        given = [f"--{name.replace('_', '-')}" for name in ("probe", *OVERRIDES) if getattr(args, name)]
+        if given:
+            parser.error(f"--status cannot be combined with {', '.join(given)}")
+
+    config = settings.load()
+    registered = config.has_section(args.command)
+    section = config[args.command] if registered else {}
+    if args.backend is None and registered:
+        args.backend = section.get("backend")
     try:
         args.backend = resolve_backend(args.command, args.backend)
     except argparse.ArgumentTypeError as exc:
-        parser.error(str(exc))
-    if args.status:
-        given = [f"--{name.replace('_', '-')}" for name in ("probe", "model", "effort", "thread_source")
-                 if getattr(args, name)]
-        if given:
-            parser.error(f"--status cannot be combined with {', '.join(given)}")
+        hint = "" if registered else f" (or register it: install.py --command {args.command} --backend ...)"
+        parser.error(f"{exc}{hint}")
+    # Flags override for this run; otherwise the command's persisted overrides apply.
+    manual = [name for name in OVERRIDES if getattr(args, name)]
+    from_file = [name for name in OVERRIDES if not getattr(args, name) and registered and section.get(name)]
+    for name in from_file:
+        setattr(args, name, section[name])
+    args.override_source = "manual" if manual else "settings" if from_file else None
+    args.tz = section.get("tz")  # --status renders in the command's timezone when it has one
     if args.probe and args.backend != "codex":
         parser.error("--probe is only supported with the codex backend (Claude's /usage read is minute-precise, too coarse to verify anchoring; see --status)")
     runner = codex_runner if args.backend == "codex" else claude_runner
     try:
-        return status.main(args) if args.status else runner.run(args)
+        rc = status.main(args) if args.status else runner.run(args)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
         print(f"{args.command}: {exc}", file=sys.stderr)
         return 2
+    # A ping is silent for cron's sake; at a terminal, say where its log went
+    # (which is also how the first run announces that it created ~/.yo/).
+    if not args.status and sys.stderr.isatty():
+        logs = codex_runner.run_logs(args.command)
+        if logs:
+            print(f"log: {logs[-1]}", file=sys.stderr)
+    return rc
 
 
 if __name__ == "__main__":

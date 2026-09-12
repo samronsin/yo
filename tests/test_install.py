@@ -7,9 +7,12 @@ import subprocess
 import time
 import unittest
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest import mock
 
 import install
+from tests.helpers import ScratchCase
+from utils import settings
 from install import (
     BASE_CRON_PATH,
     MalformedCrontab,
@@ -156,11 +159,19 @@ class ResolveBackendTest(unittest.TestCase):
         with self.assertRaisesRegex(argparse.ArgumentTypeError, "pass --backend"):
             resolve_backend("work-ai", None)
 
+    def test_unknown_backend_is_an_argument_error(self):
+        # argparse's choices never let a bad flag through; a hand-edited settings file can.
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "backend 'cdoex' for command 'work-ai' is not one of codex, claude"):
+            resolve_backend("work-ai", "cdoex")
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "drop --backend"):
+            resolve_backend("codex", "cdoex")  # a bare backend name still wins the conflict message
+
 
 class ParseArgsTest(unittest.TestCase):
-    def test_no_probe_is_an_install_option(self):
-        self.assertFalse(self._install_parse("--command", "codex").no_probe)
-        self.assertTrue(self._install_parse("--command", "codex", "--no-probe").no_probe)
+    def test_probe_is_a_tri_state_install_option(self):
+        self.assertIsNone(self._install_parse("--command", "codex").probe)
+        self.assertFalse(self._install_parse("--command", "codex", "--no-probe").probe)
+        self.assertTrue(self._install_parse("--command", "codex", "--probe").probe)
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             self._parse("--status", "--no-probe")
 
@@ -194,12 +205,13 @@ class ParseArgsTest(unittest.TestCase):
         self.assertEqual(cm.exception.code, 2)
         return stderr.getvalue()
 
-    def test_install_args_required(self):
-        # All missing flags are reported at once, and only the missing ones.
-        for argv, expected in (((), "--tz, --hours, --command"),
-                               (("--tz", "Europe/Paris", "--hours", "9-18"), "--command")):
-            with self.subTest(argv=argv):
-                self.assertIn(f"required: {expected}\n", self._usage_error(*argv))
+    def test_only_command_is_required_to_parse_an_install(self):
+        # --tz and --hours may come from the settings file, so they are checked
+        # at install time (see plan_block), not by the parser.
+        self.assertIn("required: --command\n", self._usage_error())
+        self.assertIn("required: --command\n", self._usage_error("--tz", "Europe/Paris", "--hours", "9-18"))
+        args = self._parse("--command", "codex")
+        self.assertEqual((args.tz, args.hours, args.window_hours, args.num_windows), (None, None, None, None))
 
     def test_remove_name_validated_like_command(self):
         # The name is matched against the crontab markers, so it's held to the
@@ -277,9 +289,11 @@ class ManagedBlocksTest(unittest.TestCase):
             self.assertIsNone(parse_cron_entry(other), other)
 
 
-class StatusTest(unittest.TestCase):
+class StatusTest(ScratchCase):
+
     def test_format_status(self):
-        # Logs are located from the installed yo's own path, not this checkout.
+        # Logs live under ~/.yo/logs whichever checkout installed the block; an
+        # unregistered block (installed before the settings file) says so.
         crontab = ("# >>> yo-codex-pro >>>\n"
                    "0 6 * * * /moved/yo codex-pro --backend codex\n"
                    "*/15 9-17 * * 1-5 /moved/yo codex-pro --backend codex\n"
@@ -290,14 +304,15 @@ class StatusTest(unittest.TestCase):
             "codex-pro\n"
             "  schedule: 06:00, */15 9-17 * * 1-5 system time\n"
             "  command:  /moved/yo codex-pro --backend codex\n"
-            "  logs:     /moved/logs/yo-codex-pro-<timestamp>.log\n"
-            "  last:     /moved/logs/yo-codex-pro.last.txt\n"
+            "  settings: not registered; re-run install.py --command codex-pro ... to register it\n"
+            f"  logs:     {self.log_dir}/yo-codex-pro-<timestamp>.log\n"
+            f"  last:     {self.log_dir}/yo-codex-pro.last.txt\n"
         ))
 
     def test_format_status_block_without_entries(self):
         text = format_status(installed_jobs("# >>> yo-codex >>>\n# <<< yo-codex <<<\n"))
         self.assertIn("  schedule: (no cron entries)\n", text)
-        self.assertIn(f"  logs:     {install.ROOT_DIR}/logs/yo-codex-<timestamp>.log\n", text)
+        self.assertIn(f"  logs:     {self.log_dir}/yo-codex-<timestamp>.log\n", text)
 
     def test_format_status_when_empty(self):
         self.assertEqual(format_status([]), "No yo cron jobs installed.\n")
@@ -339,7 +354,7 @@ class StatusTest(unittest.TestCase):
         self.assertIn("# >>> yo-codex >>>", merged)
 
 
-class RemoveTest(unittest.TestCase):
+class RemoveTest(ScratchCase):
     CRONTAB = ManagedBlocksTest.CRONTAB
 
     def _remove(self, command, crontab, *flags, reply="y"):
@@ -458,6 +473,146 @@ class ToSystemTimesTest(unittest.TestCase):
         with system_tz("UTC"):
             # -1h -> 23:00 in Etc/GMT-5 -> 18:00 UTC
             self.assertEqual(hour_minute(to_system_times([-1], "Etc/GMT-5")[0]), (18, 0))
+
+
+class SettingsFlowTest(ScratchCase):
+    """Install, status and remove against a private ~/.yo and a mocked crontab."""
+
+    def run_main(self, argv, crontab="", reply="y"):
+        """install.main over `argv`; returns (stdout, crontab text written or None)."""
+        out = io.StringIO()
+        reads = crontab if isinstance(crontab, list) else [crontab] * 4
+        with mock.patch("install.shutil.which", return_value="/usr/bin/x"), \
+                mock.patch("install.read_crontab", side_effect=reads), \
+                mock.patch("builtins.input", return_value=reply), \
+                mock.patch("install.subprocess.run") as run, \
+                redirect_stdout(out), redirect_stderr(io.StringIO()):
+            install.main(install.parse_args(argv))
+        return out.getvalue(), (run.call_args.kwargs["input"] if run.called else None)
+
+    def test_install_persists_a_complete_section(self):
+        _, written = self.run_main(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex-pro",
+                                      "--backend", "codex"])
+        self.assertEqual(dict(settings.load()["codex-pro"]),
+                         {"backend": "codex", "tz": "Europe/Paris", "hours": "9-18",
+                          "window_hours": "5", "num_windows": "3"})
+        self.assertIn(f" {install.JOB_CMD} codex-pro --backend codex --probe\n", written)
+
+    def test_omitted_flags_come_from_the_file_and_given_flags_win(self):
+        _, first = self.run_main(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex-pro",
+                                  "--backend", "codex"])
+        # A second command states its own schedule; nothing is inherited from the first.
+        with self.assertRaises(SystemExit) as cm:
+            self.run_main(["--hours", "19-23", "--command", "claude-perso", "--backend", "claude"])
+        self.assertIn("--tz not given", cm.exception.code)
+        self.run_main(["--tz", "UTC", "--hours", "19-23", "--command", "claude-perso", "--backend", "claude"])
+        self.assertEqual(settings.load()["claude-perso"]["hours"], "19-23")
+        # Re-installing with nothing but the name reproduces the block from the file.
+        _, again = self.run_main(["--command", "codex-pro"])
+        self.assertEqual(again, first)
+        # Given flags win and are persisted.
+        _, plain = self.run_main(["--command", "codex-pro", "--no-probe", "--model", "gpt-5.6-luna"])
+        self.assertNotIn("--probe", plain)
+        section = settings.load()["codex-pro"]
+        self.assertFalse(section.getboolean("probe"))
+        self.assertEqual(section["model"], "gpt-5.6-luna")
+
+    def test_no_hours_registers_the_command_and_leaves_the_crontab_alone(self):
+        out, written = self.run_main(["--command", "claude-perso", "--backend", "claude", "--tz", "Europe/Paris"])
+        self.assertIsNone(written)
+        self.assertEqual(dict(settings.load()["claude-perso"]), {"backend": "claude", "tz": "Europe/Paris"})
+        self.assertIn("registering it without a cron block", out)
+        self.assertIn("Settings updated; crontab untouched.", out)
+        parser = settings.load()
+        self.assertIn(f"Registered in {settings.settings_path()} without a cron block:\n"
+                      "  claude-perso (to schedule: install.py --command claude-perso --tz ... --hours ...)\n",
+                      format_status([], parser))
+        stale = render_cron([6], "UTC", "claude-perso", "claude", "/bin")
+        self.assertIn("  settings: registered without a schedule, so this block is stale; remove it",
+                      format_status(installed_jobs(stale), parser))
+        # Hours later, tz from the file: scheduled like any install; a bare re-run then keeps it scheduled.
+        _, written = self.run_main(["--command", "claude-perso", "--hours", "19-23"])
+        self.assertIn("# >>> yo-claude-perso >>>", written)
+        _, again = self.run_main(["--command", "claude-perso"])
+        self.assertEqual(again, written)
+        # Hours without a tz anywhere is still an error, and nothing is written.
+        with self.assertRaises(SystemExit) as cm:
+            self.run_main(["--command", "codex", "--hours", "9-18"])
+        self.assertEqual(cm.exception.code, f"error: codex: --tz not given and not in {settings.settings_path()}")
+        self.assertFalse(settings.load().has_section("codex"))
+
+    def test_bad_values_in_the_file_are_reported(self):
+        # A typo in the file is an error, never a silent default (a misspelt probe would
+        # otherwise quietly turn verified pings into plain ones).
+        for key, value, message in (("num_windows", "many", "num_windows = 'many'"),
+                                    ("probe", "ture", "probe = 'ture'")):
+            with self.subTest(key=key):
+                parser = settings.load()
+                parser.remove_section("codex")
+                settings.update_command(parser, "codex", {"backend": "codex", "tz": "UTC", "hours": "9-18", key: value})
+                settings.save(parser)
+                with self.assertRaises(SystemExit) as cm:
+                    self.run_main(["--command", "codex"])
+                self.assertIn(message, cm.exception.code)
+                status = format_status(installed_jobs(render_cron([6], "UTC", "codex", "codex", "/bin")), settings.load())
+                self.assertIn(f"  settings: invalid; {message}", status)  # --status survives and names the value
+
+    def test_misspelt_backend_in_the_file_stops_install_and_marks_status(self):
+        parser = settings.load()
+        settings.update_command(parser, "work-ai", {"backend": "cdoex", "tz": "UTC", "hours": "9-18"})
+        settings.save(parser)
+        with self.assertRaises(SystemExit) as cm:
+            self.run_main(["--command", "work-ai"])
+        self.assertEqual(cm.exception.code, "error: backend 'cdoex' for command 'work-ai' is not one of codex, claude")
+        self.assertIn("backend=cdoex (invalid; fix", format_status(
+            installed_jobs(render_cron([6], "UTC", "work-ai", "codex", "/bin")), settings.load()))
+
+    def test_status_compares_each_block_with_its_settings(self):
+        _, block = self.run_main(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex-pro",
+                                  "--backend", "codex"])
+        parser = settings.load()
+        described = "tz=Europe/Paris hours=9-18 windows=3x5h backend=codex"
+        self.assertIn(f"  settings: {described} (in sync)\n", format_status(installed_jobs(block), parser))
+        drifted = block.replace("* * * ", "* * 1 ", 1)
+        self.assertIn(f"  settings: {described} (differ from the crontab; run install.py --command codex-pro)\n",
+                      format_status(installed_jobs(drifted), parser))
+        text = format_status([], parser)
+        self.assertIn(f"Registered in {settings.settings_path()} without a cron block:\n"
+                      "  codex-pro (to schedule: install.py --command codex-pro)\n", text)
+
+    def test_remove_drops_the_block_and_the_section(self):
+        _, block = self.run_main(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex-pro",
+                                  "--backend", "codex"])
+        _, written = self.run_main(["--remove", "codex-pro"], crontab=block)
+        self.assertEqual(written, "")
+        self.assertFalse(settings.load().has_section("codex-pro"))
+        # Registered but no block: only the section goes, and the crontab is left alone.
+        self.run_main(["--tz", "UTC", "--hours", "9-18", "--command", "codex-pro", "--backend", "codex"])
+        _, written = self.run_main(["--remove", "codex-pro"])
+        self.assertIsNone(written)
+        self.assertFalse(settings.load().has_section("codex-pro"))
+
+    def test_settings_changed_during_confirmation_abort_before_writing(self):
+        _, block = self.run_main(["--tz", "UTC", "--hours", "9-18", "--command", "codex"])
+
+        def concurrent_install(_):
+            parser = settings.load()
+            settings.update_command(parser, "other", {"backend": "claude", "model": "opus"})
+            settings.save(parser)
+            return "y"
+
+        for argv in (["--command", "codex"], ["--remove", "codex"], ["--command", "status-only", "--backend", "claude"]):
+            with self.subTest(argv=argv):
+                parser = settings.load()
+                parser.remove_section("other")
+                settings.save(parser)
+                with mock.patch("install.confirm", side_effect=concurrent_install), \
+                        mock.patch("install.write_crontab") as write, \
+                        self.assertRaisesRegex(SystemExit, "settings changed during confirmation"):
+                    self.run_main(argv, crontab=block)
+                write.assert_not_called()
+                self.assertEqual(dict(settings.load()["codex"]), dict(parser["codex"]))
+                self.assertEqual(settings.load()["other"]["model"], "opus")
 
 
 if __name__ == "__main__":
