@@ -25,11 +25,14 @@ def status_all(config):
             print()
         try:
             backend = resolve_backend(command, section.get("backend"))
+            rc = max(rc, status.main(command, backend, section.get("tz")))
         except argparse.ArgumentTypeError as exc:
             print(f"{command}: {exc}", file=sys.stderr)
-            rc = 1
-            continue
-        rc = max(rc, status.main(command, backend, section.get("tz")))
+            rc = max(rc, 1)
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+            # e.g. a run log vanishing between listing and reading: report it, go on to the next login.
+            print(f"{command}: {exc}", file=sys.stderr)
+            rc = max(rc, 2)
     return rc
 
 

@@ -302,6 +302,26 @@ class DispatchTests(FakeCliCase):
         self.assertNotIn("wrapper2 (", out.getvalue())
         self.assertIn("wrapper2: backend 'cdoex' for command 'wrapper2' is not one of codex, claude", err.getvalue())
 
+    def test_a_failing_report_does_not_stop_the_others(self):
+        (self.root / "wrapper2").symlink_to(self.root / "wrapper")
+        parser = settings.load()
+        settings.update_command(parser, "wrapper", {"backend": "codex"})
+        settings.update_command(parser, "wrapper2", {"backend": "claude"})
+        settings.save(parser)
+
+        def last_run(command, log_dir=None):
+            if command == "wrapper":
+                raise OSError("log vanished")
+            return None
+
+        with self.with_env(FAKE_CODEX_QUOTA={"primary": five_hour(12, 7200)}), \
+                mock.patch.object(status, "last_run", side_effect=last_run), \
+                redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(yo.main(["--status"]), 2)
+        self.assertNotIn("wrapper (codex)", out.getvalue())
+        self.assertIn("wrapper2 (claude), read", out.getvalue())
+        self.assertEqual(err.getvalue(), "wrapper: log vanished\n")
+
     def test_no_command_without_registrations_or_status_is_a_usage_error(self):
         cases = ((["--status"], "none registered in"), ([], "required: command"),
                  (["--status", "--backend", "codex"], "--backend needs a command"),
