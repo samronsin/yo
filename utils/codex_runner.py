@@ -20,10 +20,10 @@ import subprocess
 import sys
 
 if __package__:
-    from .codex_anchor_probe import ROOT_DIR, WINDOW_SECS, five_hour_read, probe, read_limits_payload, window_reads
+    from .codex_anchor_probe import ROOT_DIR, WINDOW_SECS, five_hour_read, probe, quick_state, read_limits_payload
     from . import settings
 else:
-    from codex_anchor_probe import ROOT_DIR, WINDOW_SECS, five_hour_read, probe, read_limits_payload, window_reads
+    from codex_anchor_probe import ROOT_DIR, WINDOW_SECS, five_hour_read, probe, quick_state, read_limits_payload
     import settings
 
 SCHEMA = 1
@@ -153,19 +153,24 @@ def cli_version(command):
 
 
 def quota(command):
-    """Read quota windows via app-server, resolving ambiguous 5h state with window_reads()."""
+    """Read quota windows via app-server, from one read.
+
+    A status read does not wait for the probe's 15s drift test: quick_state()
+    settles every case but a 0% read with the reset at about now+5h, which is
+    reported as "idle_or_fresh" (an idle account, or a window opened in the
+    last minute or two).
+    """
     payload = read_limits_payload(command=command)
     out = {"five_hour": None, "weekly": []}
     try:
-        reads = [five_hour_read(payload)]
+        read = five_hour_read(payload)
     except RuntimeError:  # no 5h window in the payload (seen 2026-08-08 to 08-24)
-        reads = []
-    if reads:
-        state = window_reads(command, reads)
-        last = reads[-1]
-        out["five_hour"] = {"state": state, "used_percent": last["used_percent"],
-                            "resets_at": last["resets_at"], "reads": reads,
-                            "anchored_at": last["resets_at"] - WINDOW_SECS if state == "active" else None}
+        read = None
+    if read:
+        state = quick_state(read) or "idle_or_fresh"
+        out["five_hour"] = {"state": state, "used_percent": read["used_percent"],
+                            "resets_at": read["resets_at"], "reads": [read],
+                            "anchored_at": read["resets_at"] - WINDOW_SECS if state == "active" else None}
     for slot in ("primary", "secondary"):
         limit = payload.get(slot)
         if isinstance(limit, dict) and limit.get("windowDurationMins") != WINDOW_SECS // 60:

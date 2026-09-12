@@ -57,13 +57,20 @@ class CodexQuotaTests(FakeCliCase):
         self.assertEqual(quota["weekly"][0]["used_percent"], 31)
         self.sleep.assert_not_called()
 
-    def test_ambiguous_read_takes_a_second_after_the_pre_wait(self):
+    def test_status_never_waits_for_a_second_read(self):
+        # 0% with the reset at exactly now+5h: idle, or opened in the last minute or two. Say so, do not wait.
         with self.with_env(FAKE_CODEX_QUOTA=five_hour(0, anchor.WINDOW_SECS)):
             quota = codex_runner.quota("wrapper")
-        self.assertEqual(len(quota["five_hour"]["reads"]), 2)
-        self.assertEqual(quota["five_hour"]["state"], "unknown")  # sleep is mocked: no time passed between reads
-        self.assertEqual([c.args[0] for c in self.sleep.call_args_list], [anchor.PRE_WAIT_SECS])
+        self.assertEqual((quota["five_hour"]["state"], len(quota["five_hour"]["reads"])), ("idle_or_fresh", 1))
+        self.assertIsNone(quota["five_hour"]["anchored_at"])
+        self.sleep.assert_not_called()
         self.assertEqual(quota["weekly"], [])
+        # 0% with the reset 4.5h away: a window opened half an hour ago, open from one read.
+        with self.with_env(FAKE_CODEX_QUOTA=five_hour(0, anchor.WINDOW_SECS - 1800)):
+            quota = codex_runner.quota("wrapper")
+        self.assertEqual(quota["five_hour"]["state"], "active")
+        self.assertAlmostEqual(quota["five_hour"]["anchored_at"], quota["five_hour"]["resets_at"] - anchor.WINDOW_SECS)
+        self.sleep.assert_not_called()
 
     def test_account_without_a_five_hour_window_still_reports_the_rest(self):
         with self.with_env(FAKE_CODEX_QUOTA={"primary": WEEKLY}):
@@ -210,6 +217,9 @@ class FormatTests(unittest.TestCase):
                                                       "anchored_at": None, "reads": []},
                                         "weekly": [{"window_minutes": None, "used_percent": None, "resets_at": None}]})
         self.assertIn("open or idle? cannot tell, ?% used, reports reset ", unknown)
+        fresh = self.render("codex", {"five_hour": {"state": "idle_or_fresh", "used_percent": 0, "resets_at": self.NOW + 18000,
+                                                    "anchored_at": None, "reads": []}, "weekly": []})
+        self.assertIn("5h window   idle, or a window opened in the last 2 minutes, 0% used, reports reset ", fresh)
         self.assertIn("other window ?% used, resets ?", unknown)
         self.assertIn("5h window   not reported", self.render("codex", {"five_hour": None, "weekly": []}))
 

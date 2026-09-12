@@ -111,13 +111,14 @@ def format_report(out):
 def five_hour_text(state, used, resets_at, now, resets_text=None, zone=None):
     """Render an active, idle or unknown window; fall back to the CLI's reset text."""
     parts = {"active": ["open"], "idle": ["idle, no window open"],
+             "idle_or_fresh": ["idle, or a window opened in the last 2 minutes"],
              "unknown": ["open or idle? cannot tell"]}[state]
     parts.append(f"{percent(used)} used")
     if isinstance(resets_at, (int, float)):
         if state == "active":
             parts.append(f"anchored {local(resets_at - WINDOW_SECS, '%H:%M', zone)}")
             parts.append(f"resets {local(resets_at, zone=zone)} ({remaining(resets_at, now)} left)")
-        elif state == "unknown":
+        elif state != "idle":
             parts.append(f"reports reset {local(resets_at, zone=zone)}")
     elif resets_text and state != "idle":
         parts.append(f"resets {resets_text}")
