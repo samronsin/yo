@@ -76,6 +76,7 @@ command's `tz` from settings, else the machine's:
 ./yo codex --status                         # Codex login, via `codex app-server`
 ./yo claude-pro --status                    # a registered Claude wrapper, via headless `/usage`
 ./yo claude-perso --backend claude --status # an unregistered one needs --backend
+./yo --status                               # every registered command, one report each
 ```
 
 ```
@@ -85,8 +86,11 @@ codex (codex), read 2026-09-10 13:44 CEST
   last run    2026-09-10 06:00 CEST, anchored (default), rc=0, /home/me/.yo/logs/yo-codex-20260910T040004Z.log
 ```
 
-- **Codex** uses the probe's token-free quota read. An ambiguous 5h window
-  needs a second read after 15 seconds to distinguish `open` from `idle`.
+- **Codex** uses the probe's token-free quota read, once. Usage above 0%, a
+  past reset, or a reset clearly nearer than 5h each settle `open`/`idle` from
+  one read; a 0% window whose reset sits within ~90s of now+5h is reported as
+  idle or just opened, since only the probe's 15s drift test could tell, and a
+  status read does not wait for it.
 - **Claude** uses headless `/usage` (zero model turns on Claude Code 2.1.265;
   a warning appears if a version spends turns). Positive usage means `open`;
   zero is ambiguous. Unrecognized reset dates are shown as printed by the CLI.
@@ -108,7 +112,7 @@ ping in the observer (`utils/codex_runner.py` with
 `utils/codex_anchor_probe.py`):
 
 1. **Pre-read.** One quota read, plus a second 15s later only if the first is
-   ambiguous (0% used with a reset near now+5h). A window that is already
+   ambiguous (0% used with a reset within about 90s of now+5h). A window that is already
    open means nothing is sent and the run is recorded as `window_open`.
 2. **Ping.** The production invocation (`codex exec ...`, built in
    `codex_runner.py`).

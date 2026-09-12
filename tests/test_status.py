@@ -57,13 +57,20 @@ class CodexQuotaTests(FakeCliCase):
         self.assertEqual(quota["weekly"][0]["used_percent"], 31)
         self.sleep.assert_not_called()
 
-    def test_ambiguous_read_takes_a_second_after_the_pre_wait(self):
+    def test_status_never_waits_for_a_second_read(self):
+        # 0% with the reset at exactly now+5h: idle, or opened in the last minute or two. Say so, do not wait.
         with self.with_env(FAKE_CODEX_QUOTA=five_hour(0, anchor.WINDOW_SECS)):
             quota = codex_runner.quota("wrapper")
-        self.assertEqual(len(quota["five_hour"]["reads"]), 2)
-        self.assertEqual(quota["five_hour"]["state"], "unknown")  # sleep is mocked: no time passed between reads
-        self.assertEqual([c.args[0] for c in self.sleep.call_args_list], [anchor.PRE_WAIT_SECS])
+        self.assertEqual((quota["five_hour"]["state"], len(quota["five_hour"]["reads"])), ("idle_or_fresh", 1))
+        self.assertIsNone(quota["five_hour"]["anchored_at"])
+        self.sleep.assert_not_called()
         self.assertEqual(quota["weekly"], [])
+        # 0% with the reset 4.5h away: a window opened half an hour ago, open from one read.
+        with self.with_env(FAKE_CODEX_QUOTA=five_hour(0, anchor.WINDOW_SECS - 1800)):
+            quota = codex_runner.quota("wrapper")
+        self.assertEqual(quota["five_hour"]["state"], "active")
+        self.assertAlmostEqual(quota["five_hour"]["anchored_at"], quota["five_hour"]["resets_at"] - anchor.WINDOW_SECS)
+        self.sleep.assert_not_called()
 
     def test_account_without_a_five_hour_window_still_reports_the_rest(self):
         with self.with_env(FAKE_CODEX_QUOTA={"primary": WEEKLY}):
@@ -210,6 +217,10 @@ class FormatTests(unittest.TestCase):
                                                       "anchored_at": None, "reads": []},
                                         "weekly": [{"window_minutes": None, "used_percent": None, "resets_at": None}]})
         self.assertIn("open or idle? cannot tell, ?% used, reports reset ", unknown)
+        fresh = self.render("codex", {"five_hour": {"state": "idle_or_fresh", "used_percent": 0, "resets_at": self.NOW + 18000,
+                                                    "anchored_at": None, "reads": []}, "weekly": []})
+        self.assertIn(f"5h window   idle, or a window opened in the last {anchor.OPEN_WINDOW_MARGIN_SECS}s, "
+                      "0% used, reports reset ", fresh)
         self.assertIn("other window ?% used, resets ?", unknown)
         self.assertIn("5h window   not reported", self.render("codex", {"five_hour": None, "weekly": []}))
 
@@ -268,6 +279,58 @@ class DispatchTests(FakeCliCase):
         self.assertEqual(rc, 0)
         self.assertRegex(text.splitlines()[0], r"^wrapper \(claude\), read \d{4}-\d{2}-\d{2} \d{2}:\d{2} JST$")
         self.assertIn(" JST (", text)  # the 5h reset too
+
+    def test_no_command_reports_every_registered_command(self):
+        (self.root / "wrapper2").symlink_to(self.root / "wrapper")  # a second login on PATH
+        parser = settings.load()
+        settings.update_command(parser, "wrapper", {"backend": "codex", "tz": "UTC"})
+        settings.update_command(parser, "wrapper2", {"backend": "claude", "tz": "Asia/Tokyo"})
+        settings.save(parser)
+        rc, text = self.invoke("--status")
+        self.assertEqual(rc, 0)
+        reports = text.split("\n\n")
+        self.assertEqual(len(reports), 2)
+        self.assertRegex(reports[0], r"^wrapper \(codex\), read .* UTC\n  5h window   open, 12% used")
+        self.assertRegex(reports[1], r"^wrapper2 \(claude\), read .* JST\n  5h window      open, 18% used")
+        # A section that cannot be resolved is reported on stderr and the others still print; rc is 1.
+        settings.update_command(parser, "wrapper2", {"backend": "cdoex"})
+        settings.save(parser)
+        with self.with_env(FAKE_CODEX_QUOTA={"primary": five_hour(12, 7200)}), \
+                redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(yo.main(["--status"]), 1)
+        self.assertIn("wrapper (codex), read", out.getvalue())
+        self.assertNotIn("wrapper2 (", out.getvalue())
+        self.assertIn("wrapper2: backend 'cdoex' for command 'wrapper2' is not one of codex, claude", err.getvalue())
+
+    def test_a_failing_report_does_not_stop_the_others(self):
+        (self.root / "wrapper2").symlink_to(self.root / "wrapper")
+        parser = settings.load()
+        settings.update_command(parser, "wrapper", {"backend": "codex"})
+        settings.update_command(parser, "wrapper2", {"backend": "claude"})
+        settings.save(parser)
+
+        def last_run(command, log_dir=None):
+            if command == "wrapper":
+                raise OSError("log vanished")
+            return None
+
+        with self.with_env(FAKE_CODEX_QUOTA={"primary": five_hour(12, 7200)}), \
+                mock.patch.object(status, "last_run", side_effect=last_run), \
+                redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(yo.main(["--status"]), 2)
+        self.assertNotIn("wrapper (codex)", out.getvalue())
+        self.assertIn("wrapper2 (claude), read", out.getvalue())
+        self.assertEqual(err.getvalue(), "wrapper: log vanished\n")
+
+    def test_no_command_without_registrations_or_status_is_a_usage_error(self):
+        cases = ((["--status"], "none registered in"), ([], "required: command"),
+                 (["--status", "--backend", "codex"], "--backend needs a command"),
+                 (["--backend", "codex"], "required: command"))
+        for argv, message in cases:
+            with self.subTest(argv=argv), redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit) as exc:
+                yo.main(argv)
+            self.assertEqual(exc.exception.code, 2)
+            self.assertIn(message, err.getvalue())
 
     def test_failed_read_prints_the_error_and_exits_1(self):
         with self.with_env(), redirect_stdout(io.StringIO()) as stdout:

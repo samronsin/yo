@@ -8,11 +8,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 if __package__:
     from . import claude_runner, codex_runner
-    from .codex_anchor_probe import OBSERVATION_ERRORS, WINDOW_SECS
+    from .codex_anchor_probe import OBSERVATION_ERRORS, OPEN_WINDOW_MARGIN_SECS, WINDOW_SECS
 else:
     import claude_runner
     import codex_runner
-    from codex_anchor_probe import OBSERVATION_ERRORS, WINDOW_SECS
+    from codex_anchor_probe import OBSERVATION_ERRORS, OPEN_WINDOW_MARGIN_SECS, WINDOW_SECS
 
 STAMP_RE = re.compile(r"-(\d{8}T\d{6})Z\.log$")  # the UTC stamp open_run_log() puts in the name
 
@@ -111,13 +111,14 @@ def format_report(out):
 def five_hour_text(state, used, resets_at, now, resets_text=None, zone=None):
     """Render an active, idle or unknown window; fall back to the CLI's reset text."""
     parts = {"active": ["open"], "idle": ["idle, no window open"],
+             "idle_or_fresh": [f"idle, or a window opened in the last {OPEN_WINDOW_MARGIN_SECS}s"],
              "unknown": ["open or idle? cannot tell"]}[state]
     parts.append(f"{percent(used)} used")
     if isinstance(resets_at, (int, float)):
         if state == "active":
             parts.append(f"anchored {local(resets_at - WINDOW_SECS, '%H:%M', zone)}")
             parts.append(f"resets {local(resets_at, zone=zone)} ({remaining(resets_at, now)} left)")
-        elif state == "unknown":
+        elif state != "idle":
             parts.append(f"reports reset {local(resets_at, zone=zone)}")
     elif resets_text and state != "idle":
         parts.append(f"resets {resets_text}")
@@ -156,8 +157,8 @@ def quota_rows(quota, now, zone=None):
     return rows
 
 
-def main(args):
+def main(command, backend, tz=None):
     """Entry point for `yo <command> --status`: print the report, exit 1 if the quota could not be read."""
-    out = report(args.command, args.backend, getattr(args, "tz", None))
+    out = report(command, backend, tz)
     print(format_report(out), end="")
     return 1 if "error" in out else 0

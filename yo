@@ -16,9 +16,30 @@ from utils import claude_runner, codex_runner, settings, status
 OVERRIDES = ("model", "effort", "thread_source")
 
 
+def status_all(config):
+    """`yo --status` with no command: one report per registered command, in file order."""
+    rc = 0
+    for i, command in enumerate(config.sections()):
+        section = config[command]
+        if i:
+            print()
+        try:
+            backend = resolve_backend(command, section.get("backend"))
+            rc = max(rc, status.main(command, backend, section.get("tz")))
+        except argparse.ArgumentTypeError as exc:
+            print(f"{command}: {exc}", file=sys.stderr)
+            rc = max(rc, 1)
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+            # e.g. a run log vanishing between listing and reading: report it, go on to the next login.
+            print(f"{command}: {exc}", file=sys.stderr)
+            rc = max(rc, 2)
+    return rc
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    parser.add_argument("command", type=command_name)
+    parser.add_argument("command", type=command_name, nargs="?",
+                        help="the CLI to run; may be omitted with --status to report every registered command")
     parser.add_argument("--backend", choices=BACKENDS)
     for name in ("model", "effort", "thread-source"):
         parser.add_argument(f"--{name}", default="")
@@ -30,8 +51,16 @@ def main(argv=None):
         given = [f"--{name.replace('_', '-')}" for name in ("probe", *OVERRIDES) if getattr(args, name)]
         if given:
             parser.error(f"--status cannot be combined with {', '.join(given)}")
+    elif args.command is None:
+        parser.error("the following arguments are required: command")
 
     config = settings.load()
+    if args.command is None:
+        if args.backend:
+            parser.error("--backend needs a command")
+        if not config.sections():
+            parser.error(f"no command given and none registered in {settings.settings_path()}")
+        return status_all(config)
     registered = config.has_section(args.command)
     section = config[args.command] if registered else {}
     if args.backend is None and registered:
@@ -52,7 +81,7 @@ def main(argv=None):
         parser.error("--probe is only supported with the codex backend (Claude's /usage read is minute-precise, too coarse to verify anchoring; see --status)")
     runner = codex_runner if args.backend == "codex" else claude_runner
     try:
-        rc = status.main(args) if args.status else runner.run(args)
+        rc = status.main(args.command, args.backend, args.tz) if args.status else runner.run(args)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
         print(f"{args.command}: {exc}", file=sys.stderr)
         return 2

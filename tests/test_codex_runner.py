@@ -30,7 +30,10 @@ class ProbeTests(ScratchCase):
         self.assertEqual(anchor.window_state([sample(100), sample(115)]), "idle")
         self.assertEqual(anchor.quick_state(sample(100, used=3)), "active")
         self.assertEqual(anchor.quick_state(sample(100, 50)), "idle")
-        self.assertIsNone(anchor.quick_state(sample(100)))
+        self.assertIsNone(anchor.quick_state(sample(100)))  # 0%, reset at exactly now+5h
+        # 0% but the reset is clearly nearer than 5h: a real window opened earlier.
+        self.assertEqual(anchor.quick_state(sample(100, 100 + 18000 - 600)), "active")
+        self.assertIsNone(anchor.quick_state(sample(100, 100 + 18000 - 60)))  # within the margin: still ambiguous
 
     def test_five_hour_window_is_found_wherever_it_sits(self):
         five_hour = {"usedPercent": 25, "windowDurationMins": 300, "resetsAt": 1788975739}

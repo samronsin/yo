@@ -143,14 +143,20 @@ def quick_state(read):
     """Window state from a single read when it is unambiguous, else None.
 
     Usage above 0% only exists inside a live window, and a reset in the past
-    means nothing is open. Only the 0%-with-reset-near-now+5h case needs a
-    second read to separate a fresh window from the drifting hypothetical.
+    means nothing is open. An idle account reports its hypothetical reset at
+    about now+5h, so a reset clearly nearer than that belongs to a real window
+    opened earlier, even at 0%. Only a 0% read with the reset within
+    OPEN_WINDOW_MARGIN_SECS of now+5h is left: an idle account, or a window
+    opened in the last minute or two; a second read separates them by drift.
     """
     used = read.get("used_percent")
     if isinstance(used, (int, float)) and used > 0:
         return "active"
-    if read["resets_at"] <= read["read_at"]:
+    remaining = read["resets_at"] - read["read_at"]
+    if remaining <= 0:
         return "idle"
+    if remaining < WINDOW_SECS - OPEN_WINDOW_MARGIN_SECS:
+        return "active"
     return None
 
 
