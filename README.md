@@ -8,13 +8,17 @@ work. It logs the reply, and is backend-agnostic — it can drive **Codex** or
 
 ## Quickstart
 
-On an always-on host (server/VM — see [Requirements](#requirements)), in a
-checkout of this repo, with the agent CLI you want already on `PATH`:
+On an always-on host (server/VM — see [Requirements](#requirements)), with
+the agent CLI you want already on `PATH`. No checkout of this repo yet? Get
+one first:
 
 ```sh
-git clone https://github.com/samronsin/yo.git   # skip if you already have a checkout
-cd yo
+git clone https://github.com/samronsin/yo.git && cd yo
+```
 
+From the checkout:
+
+```sh
 ./yo claude                 # smoke-test: one ping now; creates ~/.yo/ and logs the reply there
 
 # install a daily schedule anchored to your working hours
@@ -384,3 +388,8 @@ Don't judge anchoring from the Codex web UI — it hides windows at 0% usage.
 - The agent CLI you select (`codex` and/or `claude`) on `PATH`.
 - Python 3.10+ (`python3`) on `PATH` for `yo`, the installer, and the utilities.
 - `cron` (the installer pipes into `crontab`).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). If you work with a coding agent,
+[AGENTS.md](AGENTS.md) holds the instructions it follows.

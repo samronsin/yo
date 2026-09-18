@@ -4,6 +4,8 @@
 
 Use this workflow only when asked to change an actual installation, settings,
 or schedule, not when developing the code that implements those operations.
+When asked how to install, answer for this checkout: start at the smoke test
+or `install.py`, and mention cloning only for another host.
 
 1. Read the README's [usage](README.md#usage), [settings](README.md#settings),
    [custom commands](README.md#custom-commands), [requirements](README.md#requirements),
@@ -26,9 +28,10 @@ or schedule, not when developing the code that implements those operations.
 
 ## Development
 
+Follow [CONTRIBUTING.md](CONTRIBUTING.md): run `python3 -m unittest` and
+`git diff --check` before handing off, keep tests free of real crontab writes
+and inference calls, and keep examples generic. In addition:
+
 - Keep changes scoped and preserve existing user edits.
-- Run `python3 -m unittest` and `git diff --check` before handing off changes.
-  Tests must mock crontab writes and inference calls, not modify real schedules
-  or spend account quota.
-- Keep examples generic. Do not publish private hostnames, paths, account
-  identifiers, credentials, or logs without explicit approval.
+- Do not publish private hostnames, paths, account identifiers, credentials,
+  or logs without explicit approval.
