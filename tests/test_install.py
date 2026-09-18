@@ -221,6 +221,11 @@ class ParseArgsTest(unittest.TestCase):
     def test_modes_are_exclusive(self):
         self.assertIn("not allowed with", self._usage_error("--status", "--remove", "codex"))
 
+    def test_dry_run_rejects_status_and_requires_install_arguments(self):
+        self.assertIn("--status cannot be combined with --dry-run",
+                      self._usage_error("--status", "--dry-run"))
+        self.assertIn("required: --command", self._usage_error("--dry-run"))
+
     def test_modes_reject_schedule_args(self):
         # Mixing a schedule with --status/--remove is almost certainly a mistake
         # (e.g. thinking --remove edits an install), so refuse rather than ignore.
@@ -354,6 +359,67 @@ class StatusTest(ScratchCase):
         self.assertIn("# >>> yo-codex >>>", merged)
 
 
+class DryRunTest(ScratchCase):
+    def test_registration_and_registered_removal_do_not_write_settings(self):
+        for argv in (["--command", "codex"], ["--remove", "codex"]):
+            with self.subTest(argv=argv):
+                parser = settings.load()
+                settings.update_command(parser, "codex", {"backend": "codex"})
+                settings.save(parser)
+                original = settings.settings_path().read_bytes()
+                args = install.parse_args([*argv, "--dry-run", "--yes"])
+                with mock.patch.object(install, "read_crontab", return_value=""), \
+                        mock.patch.object(install.shutil, "which", return_value="/bin/codex"), \
+                        mock.patch.object(install, "write_crontab") as write, \
+                        mock.patch("builtins.input") as prompt, \
+                        mock.patch.object(settings, "save") as save, \
+                        redirect_stdout(io.StringIO()):
+                    install.main(args)
+                write.assert_not_called()
+                save.assert_not_called()
+                prompt.assert_not_called()
+                self.assertEqual(settings.settings_path().read_bytes(), original)
+
+    def test_install_preview_never_prompts_or_writes_even_with_yes(self):
+        for flags in ([], ["--yes"]):
+            with self.subTest(flags=flags), system_tz("UTC"):
+                args = install.parse_args(["--tz", "UTC", "--hours", "9-18",
+                                           "--command", "work-ai", "--backend", "codex",
+                                           "--dry-run", *flags])
+                with mock.patch.object(install, "read_crontab", return_value=ManagedBlocksTest.CRONTAB) as read, \
+                        mock.patch.object(install.shutil, "which", return_value="/tools/work-ai"), \
+                        mock.patch.object(install, "write_crontab") as write, \
+                        mock.patch("builtins.input") as prompt, \
+                        mock.patch.object(install.subprocess, "run") as run, \
+                        redirect_stdout(io.StringIO()) as out:
+                    install.main(args)
+                read.assert_called_once()
+                write.assert_not_called()
+                prompt.assert_not_called()
+                run.assert_not_called()
+                self.assertFalse(settings.settings_path().exists())
+                self.assertIn("Resolved command: /tools/work-ai", out.getvalue())
+                self.assertIn("06:00, 11:02, 16:04 UTC", out.getvalue())
+                expected = render_cron([6, 11 + 2 / 60, 16 + 4 / 60], "UTC", "work-ai",
+                                       "codex", ":".join(dict.fromkeys(["/tools", *BASE_CRON_PATH.split(":")])))
+                self.assertIn(expected, out.getvalue())
+                self.assertIn("Dry run; nothing changed.", out.getvalue())
+
+    def test_dry_run_still_validates(self):
+        args = install.parse_args(["--tz", "UTC", "--hours", "9-18", "--command", "codex", "--dry-run"])
+        for path, crontab, error in ((None, "", "not found"),
+                                     ("/bin/codex", "# >>> yo-codex >>>\n", "missing its end marker")):
+            with self.subTest(error=error), \
+                    mock.patch.object(install, "read_crontab", return_value=crontab), \
+                    mock.patch.object(install.shutil, "which", return_value=path), \
+                    mock.patch.object(install, "write_crontab") as write, \
+                    mock.patch("builtins.input") as prompt:
+                with self.assertRaisesRegex(SystemExit, error):
+                    install.main(args)
+                write.assert_not_called()
+                prompt.assert_not_called()
+
+
 class RemoveTest(ScratchCase):
     CRONTAB = ManagedBlocksTest.CRONTAB
 
@@ -393,6 +459,14 @@ class RemoveTest(ScratchCase):
         _, written = self._remove("codex-pro", self.CRONTAB, "--yes")
         self.input_mock.assert_not_called()
         self.assertIsNotNone(written)
+
+    def test_dry_run_only_previews_removal(self):
+        for flags in (("--dry-run",), ("--dry-run", "--yes")):
+            out, written = self._remove("codex", self.CRONTAB, *flags)
+            self.assertIsNone(written)
+            self.input_mock.assert_not_called()
+            self.assertIn("Cron block to remove (codex):", out)
+            self.assertIn("Dry run; nothing changed.", out)
 
     def test_decline_changes_nothing(self):
         with self.assertRaises(SystemExit) as cm:

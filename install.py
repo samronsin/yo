@@ -150,7 +150,11 @@ def parse_args(argv=None):
         parser.add_argument(f"--{name}", help=f"Persist a {name} override for this command "
                                               "(yo's default otherwise; edit the file to drop it)")
     parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Preview installation or removal without prompting or changing cron or settings")
     args = parser.parse_args(argv)
+    if args.status and args.dry_run:
+        parser.error("--status cannot be combined with --dry-run")
     # --status and --remove act on the crontab and the settings file
     # as they are, so the schedule flags belong to an install only. --command is
     # the one flag an install always needs; the rest may come from the file.
@@ -585,10 +589,15 @@ def install_schedule(args):
         "backend": backend, "probe": args.probe, **{key: values[key] for key in settings.SCHEDULE_KEYS},
         "model": args.model, "effort": args.effort, "thread_source": args.thread_source,
     })
+    print(f"Resolved command: {shutil.which(command)}")
 
     print(summary)
     print(f"\nGenerated cron snippet:\n\n{cron_content}")
     print(f"Settings ({settings.settings_path()}) after install:\n\n{settings.dump(parser)}", end="")
+
+    if args.dry_run:
+        print("Dry run; nothing changed.")
+        return
 
     confirm_settings(args, "\nInstall this into your crontab and settings? [y/N] ", original)
 
@@ -615,6 +624,7 @@ def register_only(args, parser, original, command, values):
     if values["tz"]:
         check_tz(values["tz"])
     cron_path_for([command])  # yo must be able to run it
+    print(f"Resolved command: {shutil.which(command)}")
     settings.update_command(parser, command, {
         "backend": backend, "tz": values["tz"], "window_hours": args.window_hours, "num_windows": args.num_windows,
         "probe": args.probe, "model": args.model, "effort": args.effort, "thread_source": args.thread_source,
@@ -622,6 +632,9 @@ def register_only(args, parser, original, command, values):
     print(f"No hours given and none in settings for {command}: registering it without a cron block.\n"
           f"`yo {command}` and `yo {command} --status` then need no --backend; add --tz and --hours to schedule it.")
     print(f"\nSettings ({settings.settings_path()}) after this:\n\n{settings.dump(parser)}", end="")
+    if args.dry_run:
+        print("Dry run; nothing changed.")
+        return
     confirm_settings(args, "\nWrite this? [y/N] ", original)
     settings.save(parser)
     print("Settings updated; crontab untouched.")
@@ -648,6 +661,10 @@ def remove_schedule(args):
         print(f"No yo-{command} block in the crontab.")
     if registered:
         print(f"Settings section [{command}] in {settings.settings_path()} will be removed too.")
+
+    if args.dry_run:
+        print("Dry run; nothing changed.")
+        return
 
     confirm_settings(args, "\nRemove this from your crontab? [y/N] ", original)
 
