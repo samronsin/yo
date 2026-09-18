@@ -160,6 +160,19 @@ Each command gets its own crontab block and [settings](#settings) section.
 Re-running replaces only that command's block and preserves omitted settings:
 `./install.py --command codex --hours 8-17` changes just its hours.
 
+Preview without a confirmation prompt or any changes:
+
+```sh
+./install.py --tz Europe/Paris --hours 9-18 --command codex --dry-run
+./install.py --remove codex --dry-run
+```
+
+The installation preview shows the resolved executable, timezone conversion,
+proposed settings, and the actual cron block, alongside any existing block it
+would replace. It runs the normal validation and reads the crontab and settings,
+but never writes either, even with `--yes`, and sends no ping. Registration
+without a schedule can also be previewed. For agent-assisted setup, see [AGENTS.md](AGENTS.md).
+
 To see what's installed, with each command's run times, whether its block
 matches the settings file, and its log location:
 

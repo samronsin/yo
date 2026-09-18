@@ -93,23 +93,25 @@ class CronPathForTest(unittest.TestCase):
         # an agent already in a BASE_CRON_PATH dir leaves the path unchanged
         base_dir = BASE_CRON_PATH.split(":")[0]
         with mock.patch("install.shutil.which", self._which({"codex": f"{base_dir}/codex"})):
-            self.assertEqual(cron_path_for(["codex"]), BASE_CRON_PATH)
+            self.assertEqual(cron_path_for(["codex"]), (BASE_CRON_PATH, {"codex": f"{base_dir}/codex"}))
 
     def test_non_base_dir_prepended(self):
         with mock.patch("install.shutil.which", self._which({"codex": "/opt/foo/bin/codex"})):
-            self.assertEqual(cron_path_for(["codex"]), "/opt/foo/bin:" + BASE_CRON_PATH)
+            self.assertEqual(cron_path_for(["codex"]),
+                             ("/opt/foo/bin:" + BASE_CRON_PATH, {"codex": "/opt/foo/bin/codex"}))
 
     def test_multiple_agents_deduped(self):
         base_dir = BASE_CRON_PATH.split(":")[0]
         mapping = {"codex": "/opt/foo/bin/codex", "claude": f"{base_dir}/claude"}
         with mock.patch("install.shutil.which", self._which(mapping)):
             # codex's dir is prepended once; claude's (a base dir) isn't duplicated
-            self.assertEqual(cron_path_for(["codex", "claude"]), "/opt/foo/bin:" + BASE_CRON_PATH)
+            self.assertEqual(cron_path_for(["codex", "claude"]), ("/opt/foo/bin:" + BASE_CRON_PATH, mapping))
 
     def test_python3_is_resolved_alongside_the_command(self):
         mapping = {"codex": "/opt/foo/bin/codex", "python3": "/opt/py/bin/python3"}
         with mock.patch("install.shutil.which", self._which(mapping)):
-            self.assertEqual(cron_path_for(["codex", "python3"]), "/opt/foo/bin:/opt/py/bin:" + BASE_CRON_PATH)
+            self.assertEqual(cron_path_for(["codex", "python3"]),
+                             ("/opt/foo/bin:/opt/py/bin:" + BASE_CRON_PATH, mapping))
         with mock.patch("install.shutil.which", self._which({"codex": "/opt/foo/bin/codex"})):
             with self.assertRaises(SystemExit) as cm:
                 cron_path_for(["codex", "python3"])
@@ -221,6 +223,10 @@ class ParseArgsTest(unittest.TestCase):
     def test_modes_are_exclusive(self):
         self.assertIn("not allowed with", self._usage_error("--status", "--remove", "codex"))
 
+    def test_dry_run_requires_install_command_but_suits_status(self):
+        self.assertIn("required: --command", self._usage_error("--dry-run"))
+        self.assertTrue(self._parse("--status", "--dry-run").status)
+
     def test_modes_reject_schedule_args(self):
         # Mixing a schedule with --status/--remove is almost certainly a mistake
         # (e.g. thinking --remove edits an install), so refuse rather than ignore.
@@ -289,7 +295,22 @@ class ManagedBlocksTest(unittest.TestCase):
             self.assertIsNone(parse_cron_entry(other), other)
 
 
-class StatusTest(ScratchCase):
+class InstallerCase(ScratchCase):
+    def run_main(self, argv, crontab="", reply="y", *, path="/usr/bin/x", paths=None):
+        """Run with real temporary settings; return (stdout, crontab written or None)."""
+        out = io.StringIO()
+        reads = crontab if isinstance(crontab, list) else [crontab] * 4
+        with mock.patch("install.shutil.which", return_value=path, side_effect=paths) as self.which_mock, \
+                mock.patch("install.read_crontab", side_effect=reads) as self.read_mock, \
+                mock.patch("builtins.input", return_value=reply) as self.input_mock, \
+                mock.patch("install.subprocess.run") as self.run_mock, \
+                redirect_stdout(out), redirect_stderr(io.StringIO()):
+            install.main(install.parse_args(argv))
+        written = self.run_mock.call_args.kwargs["input"] if self.run_mock.called else None
+        return out.getvalue(), written
+
+
+class StatusTest(InstallerCase):
 
     def test_format_status(self):
         # Logs live under ~/.yo/logs whichever checkout installed the block; an
@@ -328,47 +349,93 @@ class StatusTest(ScratchCase):
         self.assertIn("\ncodex\n  schedule: 06:00 system time\n", out.getvalue())
 
     def test_install_rejects_malformed_block_before_prompt(self):
-        args = install.parse_args(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex"])
-        with mock.patch("install.shutil.which", return_value="/usr/bin/codex"):
-            with mock.patch("install.read_crontab", return_value="# >>> yo-codex >>>\n"):
-                with mock.patch("builtins.input") as input_mock:
-                    with self.assertRaises(SystemExit) as cm:
-                        install.main(args)
-        self.assertIn("missing its end marker", str(cm.exception))
-        input_mock.assert_not_called()
+        for flags in ([], ["--dry-run"]):
+            with self.subTest(flags=flags):
+                with self.assertRaisesRegex(SystemExit, "missing its end marker"):
+                    self.run_main(["--tz", "Europe/Paris", "--hours", "9-18",
+                                   "--command", "codex", *flags], crontab="# >>> yo-codex >>>\n")
+                self.input_mock.assert_not_called()
 
     def test_install_merges_into_crontab_as_of_confirmation(self):
         # The user may edit the crontab while reviewing the prompt; the merge
         # must build on what's there after they confirm, not the preflight read.
-        args = install.parse_args(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex"])
         before, after = "15 9 * * * echo before\n", "15 9 * * * echo after\n"
-        with mock.patch("install.shutil.which", return_value="/usr/bin/codex"):
-            with mock.patch("install.read_crontab", side_effect=[before, after]):
-                with mock.patch("builtins.input", return_value="y"):
-                    with mock.patch("install.subprocess.run") as run_mock:
-                        with redirect_stdout(io.StringIO()):
-                            install.main(args)
-        merged = run_mock.call_args.kwargs["input"]
+        _, merged = self.run_main(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex"],
+                                  crontab=[before, after])
         self.assertTrue(merged.startswith(after))
         self.assertNotIn("before", merged)
         self.assertIn("# >>> yo-codex >>>", merged)
 
 
-class RemoveTest(ScratchCase):
+class DryRunTest(InstallerCase):
+    def test_resolved_command_is_printed_once_from_the_original_lookup(self):
+        for schedule in ([], ["--tz", "UTC", "--hours", "9-18"]):
+            for flags in (["--dry-run"], ["--yes"]):
+                with self.subTest(schedule=schedule, flags=flags):
+                    paths = ["/tools/codex", "/python/bin/python3"] if schedule else ["/tools/codex"]
+                    out, _ = self.run_main(["--command", "codex", *schedule, *flags], paths=paths)
+                    expected = [mock.call("codex"), mock.call("python3")] if schedule else [mock.call("codex")]
+                    self.assertEqual(self.which_mock.call_args_list, expected)
+                    self.assertEqual(out.count("Resolved command:"), 1)
+                    self.assertIn("Resolved command: /tools/codex\n", out)
+
+    def test_preview_distinguishes_new_block_from_replacement(self):
+        old = render_cron([7], "UTC", "codex", "codex", "/old/bin", probe=False)
+        other = render_cron([8], "UTC", "claude", "claude", "/other/bin")
+        for existing in ("", old):
+            with self.subTest(replacement=bool(existing)), system_tz("UTC"):
+                text, written = self.run_main(["--command", "codex", "--tz", "UTC",
+                                               "--hours", "9-18", "--dry-run"],
+                                              crontab=existing + other)
+                if existing:
+                    self.assertIn("Existing cron block to replace (codex):\n\n" + old, text)
+                    self.assertIn("Proposed replacement cron block:", text)
+                else:
+                    self.assertIn("No existing cron block for codex; proposed new cron block:", text)
+                self.assertIn(f"0 6 * * * {install.JOB_CMD} codex --probe", text)
+                self.assertNotIn(other, text)
+                self.assertIsNone(written)
+
+    def test_registration_and_registered_removal_do_not_write_settings(self):
+        for argv in (["--command", "codex", "--model", "new-model"], ["--remove", "codex"]):
+            for flags in ([], ["--yes"]):
+                with self.subTest(argv=argv, flags=flags):
+                    parser = settings.load()
+                    settings.update_command(parser, "codex", {"backend": "codex", "model": "old-model"})
+                    settings.save(parser)
+                    original = settings.settings_path().read_bytes()
+                    out, written = self.run_main([*argv, "--dry-run", *flags])
+                    self.assertIsNone(written)
+                    self.input_mock.assert_not_called()
+                    self.assertEqual(settings.settings_path().read_bytes(), original)
+                    self.assertIn("Dry run; nothing changed.", out)
+                    if "--command" in argv:
+                        self.assertIn("model = new-model", out)
+                        self.assertIn(f"Proposed settings ({settings.settings_path()}):", out)
+
+    def test_install_preview_never_prompts_or_writes_even_with_yes(self):
+        for flags in ([], ["--yes"]):
+            with self.subTest(flags=flags), system_tz("UTC"):
+                out, written = self.run_main(["--tz", "UTC", "--hours", "9-18",
+                                              "--command", "work-ai", "--backend", "codex",
+                                              "--dry-run", *flags],
+                                             crontab=ManagedBlocksTest.CRONTAB, path="/tools/work-ai")
+                self.read_mock.assert_called_once()
+                self.assertIsNone(written)
+                self.input_mock.assert_not_called()
+                self.assertFalse(settings.settings_path().exists())
+                self.assertIn("Resolved command: /tools/work-ai", out)
+                self.assertIn("06:00, 11:02, 16:04 UTC", out)
+                self.assertIn(render_cron([6, 11 + 2 / 60, 16 + 4 / 60], "UTC", "work-ai", "codex",
+                                          "/tools:" + BASE_CRON_PATH), out)
+                self.assertIn("Dry run; nothing changed.", out)
+
+
+class RemoveTest(InstallerCase):
     CRONTAB = ManagedBlocksTest.CRONTAB
 
     def _remove(self, command, crontab, *flags, reply="y"):
-        """Run `--remove command` against `crontab`; returns (stdout, crontab written or None)."""
-        args = install.parse_args(["--remove", command, *flags])
-        reads = crontab if isinstance(crontab, list) else [crontab, crontab]
-        out = io.StringIO()
-        with mock.patch("install.read_crontab", side_effect=reads):
-            with mock.patch("builtins.input", return_value=reply) as self.input_mock:
-                with mock.patch("install.subprocess.run") as run_mock:
-                    with redirect_stdout(out):
-                        install.main(args)
-        written = run_mock.call_args.kwargs["input"] if run_mock.called else None
-        return out.getvalue(), written
+        return self.run_main(["--remove", command, *flags], crontab=crontab, reply=reply)
 
     def test_removes_only_the_selected_block(self):
         out, written = self._remove("codex", self.CRONTAB)
@@ -393,6 +460,14 @@ class RemoveTest(ScratchCase):
         _, written = self._remove("codex-pro", self.CRONTAB, "--yes")
         self.input_mock.assert_not_called()
         self.assertIsNotNone(written)
+
+    def test_dry_run_only_previews_removal(self):
+        for flags in (("--dry-run",), ("--dry-run", "--yes")):
+            out, written = self._remove("codex", self.CRONTAB, *flags)
+            self.assertIsNone(written)
+            self.input_mock.assert_not_called()
+            self.assertIn("Cron block to remove (codex):", out)
+            self.assertIn("Dry run; nothing changed.", out)
 
     def test_decline_changes_nothing(self):
         with self.assertRaises(SystemExit) as cm:
@@ -475,20 +550,8 @@ class ToSystemTimesTest(unittest.TestCase):
             self.assertEqual(hour_minute(to_system_times([-1], "Etc/GMT-5")[0]), (18, 0))
 
 
-class SettingsFlowTest(ScratchCase):
+class SettingsFlowTest(InstallerCase):
     """Install, status and remove against a private ~/.yo and a mocked crontab."""
-
-    def run_main(self, argv, crontab="", reply="y"):
-        """install.main over `argv`; returns (stdout, crontab text written or None)."""
-        out = io.StringIO()
-        reads = crontab if isinstance(crontab, list) else [crontab] * 4
-        with mock.patch("install.shutil.which", return_value="/usr/bin/x"), \
-                mock.patch("install.read_crontab", side_effect=reads), \
-                mock.patch("builtins.input", return_value=reply), \
-                mock.patch("install.subprocess.run") as run, \
-                redirect_stdout(out), redirect_stderr(io.StringIO()):
-            install.main(install.parse_args(argv))
-        return out.getvalue(), (run.call_args.kwargs["input"] if run.called else None)
 
     def test_install_persists_a_complete_section(self):
         _, written = self.run_main(["--tz", "Europe/Paris", "--hours", "9-18", "--command", "codex-pro",
