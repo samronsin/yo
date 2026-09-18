@@ -4,6 +4,8 @@
 
 Use this workflow only when asked to change an actual installation, settings,
 or schedule, not when developing the code that implements those operations.
+When asked how to install, answer for this checkout: start at the smoke test
+or `install.py`, and mention cloning only for another host.
 
 1. Read the README's [usage](README.md#usage), [settings](README.md#settings),
    [custom commands](README.md#custom-commands), [requirements](README.md#requirements),
