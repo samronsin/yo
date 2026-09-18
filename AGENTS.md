@@ -28,9 +28,10 @@ or `install.py`, and mention cloning only for another host.
 
 ## Development
 
+Follow [CONTRIBUTING.md](CONTRIBUTING.md): run `python3 -m unittest` and
+`git diff --check` before handing off, keep tests free of real crontab writes
+and inference calls, and keep examples generic. In addition:
+
 - Keep changes scoped and preserve existing user edits.
-- Run `python3 -m unittest` and `git diff --check` before handing off changes.
-  Tests must mock crontab writes and inference calls, not modify real schedules
-  or spend account quota.
-- Keep examples generic. Do not publish private hostnames, paths, account
-  identifiers, credentials, or logs without explicit approval.
+- Do not publish private hostnames, paths, account identifiers, credentials,
+  or logs without explicit approval.

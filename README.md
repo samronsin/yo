@@ -388,3 +388,8 @@ Don't judge anchoring from the Codex web UI — it hides windows at 0% usage.
 - The agent CLI you select (`codex` and/or `claude`) on `PATH`.
 - Python 3.10+ (`python3`) on `PATH` for `yo`, the installer, and the utilities.
 - `cron` (the installer pipes into `crontab`).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). If you work with a coding agent,
+[AGENTS.md](AGENTS.md) holds the instructions it follows.
