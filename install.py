@@ -153,8 +153,6 @@ def parse_args(argv=None):
     parser.add_argument("--dry-run", action="store_true",
                         help="Preview installation or removal without prompting or changing cron or settings")
     args = parser.parse_args(argv)
-    if args.status and args.dry_run:
-        parser.error("--status cannot be combined with --dry-run")
     # --status and --remove act on the crontab and the settings file
     # as they are, so the schedule flags belong to an install only. --command is
     # the one flag an install always needs; the rest may come from the file.
@@ -248,7 +246,7 @@ def to_system_times(run_times, tz):
 
 
 def cron_path_for(commands):
-    """Build the cron PATH so the jobs find each command where it lives.
+    """Return (cron PATH, command-to-executable mapping) from one resolution pass.
 
     Resolves each command in the installer's environment with shutil.which
     (erroring if one is missing) and prepends the directory it was found in to
@@ -257,6 +255,7 @@ def cron_path_for(commands):
     an interactive shell's alias definitions.
     """
     dirs = []
+    resolved = {}
     for command in commands:
         location = shutil.which(command)
         if location is None:
@@ -266,7 +265,8 @@ def cron_path_for(commands):
                 "scripts or binaries, not shell aliases"
             )
         dirs.append(str(Path(location).parent))
-    return ":".join(dict.fromkeys(dirs + BASE_CRON_PATH.split(":")))
+        resolved[command] = location
+    return ":".join(dict.fromkeys(dirs + BASE_CRON_PATH.split(":"))), resolved
 
 
 def render_cron(system_times, tz, command, backend, cron_path, probe=None):
@@ -562,12 +562,16 @@ def main(args):
         sys.exit(f"error: {exc}; fix it by hand (crontab -e) and retry")
 
 
-def confirm_settings(args, prompt, original):
-    """Approve the preview only if its source settings are still current."""
+def approve(args, prompt, original) -> bool:
+    """Decline dry runs; otherwise approve only while source settings are current."""
+    if args.dry_run:
+        print("Dry run; nothing changed.")
+        return False
     if not args.yes and not confirm(prompt):
         sys.exit("Aborted; nothing changed.")
     if settings.dump(settings.load()) != original:
         sys.exit("Aborted; settings changed during confirmation. Retry with the current settings.")
+    return True
 
 
 def install_schedule(args):
@@ -576,11 +580,14 @@ def install_schedule(args):
     original = settings.dump(parser)
     command = args.command
     values = effective_settings(parser, command, args)
+    cron_path, resolved = cron_path_for([command, "python3"] if values["hours"] else [command])
+    print(f"Resolved command: {resolved[command]}")
     if not values["hours"]:
         return register_only(args, parser, original, command, values)
-    backend, cron_content, summary = plan_block(command, values, cron_path_for([command, "python3"]))
+    backend, cron_content, summary = plan_block(command, values, cron_path)
     # Preflight: a malformed crontab should fail before the user approves anything.
-    remove_managed_block(crontab, command)
+    segments = split_managed_blocks(crontab)
+    existing = [line for owner, lines in segments if owner == command for line in lines]
 
     # Persist what this install used, so the section stands on its own: the
     # schedule values and the backend always; probe and the model overrides
@@ -589,17 +596,17 @@ def install_schedule(args):
         "backend": backend, "probe": args.probe, **{key: values[key] for key in settings.SCHEDULE_KEYS},
         "model": args.model, "effort": args.effort, "thread_source": args.thread_source,
     })
-    print(f"Resolved command: {shutil.which(command)}")
 
     print(summary)
-    print(f"\nGenerated cron snippet:\n\n{cron_content}")
-    print(f"Settings ({settings.settings_path()}) after install:\n\n{settings.dump(parser)}", end="")
+    if existing:
+        print(f"\nExisting cron block to replace ({command}):\n\n" + "\n".join(existing) + "\n")
+        print(f"Proposed replacement cron block:\n\n{cron_content}")
+    else:
+        print(f"\nNo existing cron block for {command}; proposed new cron block:\n\n{cron_content}")
+    print(f"Proposed settings ({settings.settings_path()}):\n\n{settings.dump(parser)}", end="")
 
-    if args.dry_run:
-        print("Dry run; nothing changed.")
+    if not approve(args, "\nInstall this into your crontab and settings? [y/N] ", original):
         return
-
-    confirm_settings(args, "\nInstall this into your crontab and settings? [y/N] ", original)
 
     # Drop only this command's block, so re-running replaces it while leaving
     # other commands' blocks (and the user's own lines) untouched. Re-read now:
@@ -623,19 +630,15 @@ def register_only(args, parser, original, command, values):
         sys.exit(f"error: {exc}")
     if values["tz"]:
         check_tz(values["tz"])
-    cron_path_for([command])  # yo must be able to run it
-    print(f"Resolved command: {shutil.which(command)}")
     settings.update_command(parser, command, {
         "backend": backend, "tz": values["tz"], "window_hours": args.window_hours, "num_windows": args.num_windows,
         "probe": args.probe, "model": args.model, "effort": args.effort, "thread_source": args.thread_source,
     })
     print(f"No hours given and none in settings for {command}: registering it without a cron block.\n"
           f"`yo {command}` and `yo {command} --status` then need no --backend; add --tz and --hours to schedule it.")
-    print(f"\nSettings ({settings.settings_path()}) after this:\n\n{settings.dump(parser)}", end="")
-    if args.dry_run:
-        print("Dry run; nothing changed.")
+    print(f"\nProposed settings ({settings.settings_path()}):\n\n{settings.dump(parser)}", end="")
+    if not approve(args, "\nWrite this? [y/N] ", original):
         return
-    confirm_settings(args, "\nWrite this? [y/N] ", original)
     settings.save(parser)
     print("Settings updated; crontab untouched.")
 
@@ -662,11 +665,8 @@ def remove_schedule(args):
     if registered:
         print(f"Settings section [{command}] in {settings.settings_path()} will be removed too.")
 
-    if args.dry_run:
-        print("Dry run; nothing changed.")
+    if not approve(args, "\nRemove this from your crontab? [y/N] ", original):
         return
-
-    confirm_settings(args, "\nRemove this from your crontab? [y/N] ", original)
 
     if block:
         # Re-read: the crontab may have changed while the user was reviewing the prompt.

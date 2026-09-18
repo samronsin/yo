@@ -169,7 +169,9 @@ Preview without a confirmation prompt or any changes:
 
 The installation preview shows the resolved executable, timezone conversion, and
 actual cron block, along with proposed settings. It performs the normal validation
-and reads the existing crontab and settings, but never writes either, even with
+and identifies a new block versus a replacement, showing the existing block
+that would be replaced. It reads the existing crontab and settings, but never
+writes either, even with
 `--yes`. Registration without a schedule can also be previewed. It does not send a ping.
 For agent-assisted setup, see [AGENTS.md](AGENTS.md).
 
