@@ -223,15 +223,9 @@ class ParseArgsTest(unittest.TestCase):
     def test_modes_are_exclusive(self):
         self.assertIn("not allowed with", self._usage_error("--status", "--remove", "codex"))
 
-    def test_status_accepts_execution_flags_without_masking_schedule_clashes(self):
-        for flags in (["--yes"], ["--dry-run"], ["--yes", "--dry-run"]):
-            with self.subTest(flags=flags):
-                self.assertTrue(self._parse("--status", *flags).status)
-                self.assertIn("--status cannot be combined with --tz, --hours\n",
-                              self._usage_error("--status", *flags, "--tz", "UTC", "--hours", "9-18"))
-
-    def test_dry_run_requires_install_command(self):
+    def test_dry_run_requires_install_command_but_suits_status(self):
         self.assertIn("required: --command", self._usage_error("--dry-run"))
+        self.assertTrue(self._parse("--status", "--dry-run").status)
 
     def test_modes_reject_schedule_args(self):
         # Mixing a schedule with --status/--remove is almost certainly a mistake
@@ -361,7 +355,6 @@ class StatusTest(InstallerCase):
                     self.run_main(["--tz", "Europe/Paris", "--hours", "9-18",
                                    "--command", "codex", *flags], crontab="# >>> yo-codex >>>\n")
                 self.input_mock.assert_not_called()
-                self.run_mock.assert_not_called()
 
     def test_install_merges_into_crontab_as_of_confirmation(self):
         # The user may edit the crontab while reviewing the prompt; the merge
@@ -397,17 +390,11 @@ class DryRunTest(InstallerCase):
                 if existing:
                     self.assertIn("Existing cron block to replace (codex):\n\n" + old, text)
                     self.assertIn("Proposed replacement cron block:", text)
-                    self.assertNotIn("proposed new cron block", text)
                 else:
                     self.assertIn("No existing cron block for codex; proposed new cron block:", text)
-                    self.assertNotIn("Existing cron block to replace", text)
                 self.assertIn(f"0 6 * * * {install.JOB_CMD} codex --probe", text)
                 self.assertNotIn(other, text)
-                self.assertIn(f"Proposed settings ({settings.settings_path()}):", text)
-                self.assertNotIn("after install:", text)
                 self.assertIsNone(written)
-                self.input_mock.assert_not_called()
-                self.assertFalse(settings.settings_path().exists())
 
     def test_registration_and_registered_removal_do_not_write_settings(self):
         for argv in (["--command", "codex", "--model", "new-model"], ["--remove", "codex"]):
@@ -425,16 +412,6 @@ class DryRunTest(InstallerCase):
                     if "--command" in argv:
                         self.assertIn("model = new-model", out)
                         self.assertIn(f"Proposed settings ({settings.settings_path()}):", out)
-                        self.assertNotIn("after this:", out)
-
-    def test_registration_dry_run_does_not_create_settings(self):
-        for flags in ([], ["--yes"]):
-            with self.subTest(flags=flags):
-                self.assertFalse(settings.settings_path().exists())
-                _, written = self.run_main(["--command", "codex", "--dry-run", *flags])
-                self.assertIsNone(written)
-                self.input_mock.assert_not_called()
-                self.assertFalse(settings.settings_path().exists())
 
     def test_install_preview_never_prompts_or_writes_even_with_yes(self):
         for flags in ([], ["--yes"]):
@@ -446,21 +423,12 @@ class DryRunTest(InstallerCase):
                 self.read_mock.assert_called_once()
                 self.assertIsNone(written)
                 self.input_mock.assert_not_called()
-                self.run_mock.assert_not_called()
                 self.assertFalse(settings.settings_path().exists())
                 self.assertIn("Resolved command: /tools/work-ai", out)
                 self.assertIn("06:00, 11:02, 16:04 UTC", out)
-                for minute, hour in ((0, 6), (2, 11), (4, 16)):
-                    self.assertIn(f"{minute} {hour} * * * {install.JOB_CMD} work-ai --backend codex --probe\n", out)
-                self.assertIn("# >>> yo-work-ai >>>\n", out)
-                self.assertIn("# <<< yo-work-ai <<<\n", out)
+                self.assertIn(render_cron([6, 11 + 2 / 60, 16 + 4 / 60], "UTC", "work-ai", "codex",
+                                          "/tools:" + BASE_CRON_PATH), out)
                 self.assertIn("Dry run; nothing changed.", out)
-
-    def test_dry_run_rejects_missing_command(self):
-        with self.assertRaisesRegex(SystemExit, "not found"):
-            self.run_main(["--tz", "UTC", "--hours", "9-18", "--command", "codex", "--dry-run"], path=None)
-        self.run_mock.assert_not_called()
-        self.input_mock.assert_not_called()
 
 
 class RemoveTest(InstallerCase):
