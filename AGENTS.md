@@ -9,7 +9,10 @@ or schedule, not when developing the code that implements those operations.
    [custom commands](README.md#custom-commands), [requirements](README.md#requirements),
    and [timezones](README.md#timezones), plus `./install.py --help`.
 2. Confirm the target machine, commands/accounts, timezone, and working hours.
-   Check prerequisites without sending inference requests or exposing credentials.
+   Cron runs `yo` from the checkout that installed it: install from this one, or
+   from a persistent clone on the target host. Check prerequisites without
+   sending inference requests or exposing credentials; the Quickstart's `./yo`
+   smoke test is optional and spends a paid ping.
 3. Inspect `./install.py --status`. Build a command with the approved settings
    explicitly supplied, rather than relying on saved values, and run it with
    `--dry-run`. Show the proposed additions/replacements/removals and settings
