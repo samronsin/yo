@@ -8,9 +8,15 @@ work. It logs the reply, and is backend-agnostic — it can drive **Codex** or
 
 ## Quickstart
 
-On an always-on host (server/VM — see [Requirements](#requirements)), in a
-checkout of this repo, with the agent CLI you want already on `PATH`. No
-checkout yet? `git clone https://github.com/samronsin/yo.git && cd yo` first.
+On an always-on host (server/VM — see [Requirements](#requirements)), with
+the agent CLI you want already on `PATH`. No checkout of this repo yet? Get
+one first:
+
+```sh
+git clone https://github.com/samronsin/yo.git && cd yo
+```
+
+From the checkout:
 
 ```sh
 ./yo claude                 # smoke-test: one ping now; creates ~/.yo/ and logs the reply there
